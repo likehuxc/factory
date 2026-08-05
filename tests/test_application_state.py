@@ -46,3 +46,17 @@ def test_fault_always_relocks() -> None:
     assert state.safety_locked is True
     assert state.link_state is LinkState.FAULT
     assert state.fault_message == "bus-off"
+
+
+def test_saved_can_mapping_is_applied_when_evt_changes() -> None:
+    state = ApplicationState()
+    mapping = {
+        "head_torso": "can7",
+        "left_arm": "can6",
+        "right_arm": "can4",
+        "chassis": "can2",
+    }
+    state.register_evt_can_mapping("EVT1", mapping, apply_current=False)
+    state.set_evt("EVT1")
+    assert state.evt.nodes_for_bus("can7")[0].logic_id == 1
+    assert state.evt.nodes_for_bus("can6")[0].logic_id == 7

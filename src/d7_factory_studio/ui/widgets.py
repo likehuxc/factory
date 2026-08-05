@@ -6,7 +6,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -18,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from d7_factory_studio.application import ApplicationState
 from d7_factory_studio.core.models import ConnectionMode, LinkState
+from d7_factory_studio.ui.controls import D7ComboBox as QComboBox
 from d7_factory_studio.ui.icons import lucide_icon
 from d7_factory_studio.ui.theme import COLORS
 
@@ -104,7 +104,7 @@ class PrimaryNavButton(QToolButton):
         hover = COLORS["primary"] if checked else COLORS["sidebar_hover"]
         self.setStyleSheet(
             f"QToolButton {{color:{color}; background:{background}; border:none; border-radius:10px; "
-            "font-size:11px; font-weight:600; padding:5px 3px;}"
+            "font-size:12px; font-weight:600; padding:5px 3px;}"
             f"QToolButton:hover {{background:{hover}; color:white;}}"
         )
 
@@ -182,7 +182,7 @@ class StatusPill(QLabel):
         self.setText(text)
         self.setStyleSheet(
             f"color:{foreground}; background:{background}; border-radius:9px; "
-            "padding:4px 9px; font-size:11px; font-weight:700;"
+            "padding:4px 9px; font-size:12px; font-weight:700;"
         )
 
 

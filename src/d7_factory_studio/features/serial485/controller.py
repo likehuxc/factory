@@ -122,14 +122,25 @@ class Serial485Controller:
         if not self.service.echo(build_echo(station=station_from_comm_id(comm_id)), timeout_s=2.5):
             raise Serial485ControllerError(f"ID 0x{comm_id:02X} 写入后回读验证失败")
 
-    def release_control_authority(self, comm_id: int, token: CancellationToken | None = None) -> None:
+    def set_control_authority(
+        self,
+        comm_id: int,
+        owned: bool,
+        token: CancellationToken | None = None,
+    ) -> None:
         active_token = self._begin_operation(token)
         station = station_from_comm_id(comm_id)
-        self._write_items(station, [control_authority_item(0)], active_token)
+        self._write_items(station, [control_authority_item(1 if owned else 0)], active_token)
         self._sleep(0.15, active_token)
         self._write_items(station, [eeprom_save_item()], active_token)
         self._sleep(0.65, active_token)
         self._write_items(station, [system_reset_item()], active_token)
+
+    def take_control_authority(self, comm_id: int, token: CancellationToken | None = None) -> None:
+        self.set_control_authority(comm_id, True, token)
+
+    def release_control_authority(self, comm_id: int, token: CancellationToken | None = None) -> None:
+        self.set_control_authority(comm_id, False, token)
 
     def set_controlword(
         self,

@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -20,6 +17,15 @@ from PySide6.QtWidgets import (
 
 from d7_factory_studio.application import ApplicationState
 from d7_factory_studio.core.models import LinkState
+from d7_factory_studio.ui.controls import (
+    D7ComboBox as QComboBox,
+)
+from d7_factory_studio.ui.controls import (
+    D7DoubleSpinBox as QDoubleSpinBox,
+)
+from d7_factory_studio.ui.controls import (
+    D7SpinBox as QSpinBox,
+)
 from d7_factory_studio.ui.pages.base import FormSection, InlineMessage, LogConsole, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, PageHeader, clear_layout
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,51 @@ from d7_factory_studio.core.models import CanMode
 
 class EvtConfigError(ValueError):
     pass
+
+
+CAN_REGIONS = ("head_torso", "left_arm", "right_arm", "chassis")
+CAN_REGION_LABELS = {
+    "head_torso": "躯干 & 头部",
+    "left_arm": "左臂",
+    "right_arm": "右臂",
+    "chassis": "底盘",
+}
+
+
+def group_region(group: str) -> str:
+    normalized = group.strip().upper()
+    if normalized in {"HEAD_TORSO", "HEAD_WAIST"}:
+        return "head_torso"
+    if normalized in {"LEFT_ARM", "LEFT_ARM_HAND"}:
+        return "left_arm"
+    if normalized in {"RIGHT_ARM", "RIGHT_ARM_HAND"}:
+        return "right_arm"
+    if normalized == "CHASSIS":
+        return "chassis"
+    raise EvtConfigError(f"未知 D7 电机分组: {group}")
+
+
+def group_label(group: str) -> str:
+    return CAN_REGION_LABELS[group_region(group)]
+
+
+def interface_role_label(role: str) -> str:
+    labels = []
+    for value in role.split("+"):
+        normalized = value.strip().lower()
+        if normalized == "ota":
+            labels.append("升级")
+        elif normalized in {"head_torso", "head_waist"}:
+            labels.append(CAN_REGION_LABELS["head_torso"])
+        elif normalized in {"left_arm", "left_arm_hand"}:
+            labels.append(CAN_REGION_LABELS["left_arm"])
+        elif normalized in {"right_arm", "right_arm_hand"}:
+            labels.append(CAN_REGION_LABELS["right_arm"])
+        elif normalized == "chassis":
+            labels.append(CAN_REGION_LABELS["chassis"])
+        else:
+            labels.append(value.replace("_", " "))
+    return " / ".join(labels)
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +237,54 @@ def builtin_evt_path(variant: str = "EVT2") -> Path:
 
 def load_builtin_evt(variant: str = "EVT2") -> EvtConfig:
     return load_evt_config(builtin_evt_path(variant))
+
+
+def evt_can_mapping(config: EvtConfig) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for node in config.nodes:
+        mapping.setdefault(group_region(node.group), node.bus)
+    missing = set(CAN_REGIONS) - set(mapping)
+    if missing:
+        raise EvtConfigError(f"EVT 配置缺少区域: {sorted(missing)}")
+    return mapping
+
+
+def remap_evt_can(config: EvtConfig, mapping: dict[str, str]) -> EvtConfig:
+    missing = set(CAN_REGIONS) - set(mapping)
+    if missing:
+        raise EvtConfigError(f"CAN 映射缺少区域: {sorted(missing)}")
+    normalized = {region: str(mapping[region]).strip().lower() for region in CAN_REGIONS}
+    if any(not bus.startswith("can") or not bus[3:].isdigit() for bus in normalized.values()):
+        raise EvtConfigError("CAN 通道必须使用 can0..can7 格式")
+    if any(not 0 <= int(bus[3:]) <= 7 for bus in normalized.values()):
+        raise EvtConfigError("CAN 通道必须在 can0..can7 范围内")
+    ota_buses = {item.name for item in config.interfaces.values() if item.role == "ota"}
+    conflicts = ota_buses.intersection(normalized.values())
+    if conflicts:
+        raise EvtConfigError(f"电机 CAN 通道不能占用升级通道: {sorted(conflicts)}")
+
+    nodes = tuple(replace(node, bus=normalized[group_region(node.group)]) for node in config.nodes)
+    interface_regions: dict[str, list[str]] = {}
+    for region in CAN_REGIONS:
+        interface_regions.setdefault(normalized[region], []).append(region)
+
+    interfaces: dict[str, CanInterfaceConfig] = {}
+    for bus, regions in interface_regions.items():
+        source = config.interfaces.get(bus)
+        interfaces[bus] = CanInterfaceConfig(
+            name=bus,
+            role="+".join(regions),
+            mode=CanMode.FD,
+            bitrate=source.bitrate if source and source.mode is CanMode.FD else 1_000_000,
+            dbitrate=source.dbitrate if source and source.mode is CanMode.FD else 5_000_000,
+            sample_point=source.sample_point if source else None,
+            data_sample_point=source.data_sample_point if source else None,
+            restart_ms=source.restart_ms if source else 100,
+        )
+    for item in config.interfaces.values():
+        if item.role == "ota":
+            interfaces[item.name] = item
+    return replace(config, interfaces=interfaces, nodes=nodes)
 
 
 def agent_config_yaml(config: EvtConfig) -> str:

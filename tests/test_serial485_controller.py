@@ -9,8 +9,11 @@ from d7_factory_studio.protocols.serial485 import (
     CONTROLWORD_STOP_POSITION,
     build_0e_write_multi,
     build_echo,
+    control_authority_item,
     controlword_item,
+    eeprom_save_item,
     speed_mode_items,
+    system_reset_item,
 )
 
 
@@ -53,6 +56,22 @@ def test_cycle_finally_sends_both_stop_commands_after_cancellation() -> None:
         station=0, items=[controlword_item(CONTROLWORD_STOP_POSITION)]
     )
     assert service.writes[-2:] == [expected_speed_stop, expected_position_stop]
+
+
+def test_485_control_authority_can_be_taken_and_released() -> None:
+    service = FakeSerialService()
+    controller = Serial485Controller(service, sleeper=lambda _seconds: None)
+    controller.take_control_authority(1)
+    controller.release_control_authority(1)
+    expected = [
+        build_0e_write_multi(station=0, items=[control_authority_item(1)]),
+        build_0e_write_multi(station=0, items=[eeprom_save_item()]),
+        build_0e_write_multi(station=0, items=[system_reset_item()]),
+        build_0e_write_multi(station=0, items=[control_authority_item(0)]),
+        build_0e_write_multi(station=0, items=[eeprom_save_item()]),
+        build_0e_write_multi(station=0, items=[system_reset_item()]),
+    ]
+    assert service.writes == expected
 
 
 class FakePort:

@@ -11,14 +11,23 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from d7_factory_studio.application import ApplicationState
+from d7_factory_studio.core.evt import (
+    CAN_REGION_LABELS,
+    CAN_REGIONS,
+    EvtConfigError,
+    evt_can_mapping,
+    load_builtin_evt,
+    remap_evt_can,
+)
 from d7_factory_studio.settings_store import SettingsStore
+from d7_factory_studio.ui.controls import D7ComboBox as QComboBox
+from d7_factory_studio.ui.controls import D7SpinBox as QSpinBox
 from d7_factory_studio.ui.pages.base import InlineMessage, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, PageHeader
 
@@ -28,11 +37,13 @@ class SettingsPage(WorkbenchPage):
         super().__init__()
         self.state = state
         self.settings = settings
+        self._load_saved_can_mappings()
         self.layout.addWidget(
             PageHeader("设置", "管理 PC CAN、Orin SSH、文件路径和高风险操作；切换关键配置会恢复安全锁。")
         )
         tabs = QTabWidget()
         tabs.addTab(self._pc_tab(), "PC CAN")
+        tabs.addTab(self._can_mapping_tab(), "CAN 映射")
         tabs.addTab(self._ssh_tab(), "Orin SSH")
         tabs.addTab(self._diagnostics_tab(), "网络诊断")
         tabs.addTab(self._paths_tab(), "文件与报告")
@@ -72,6 +83,47 @@ class SettingsPage(WorkbenchPage):
         card.body.addLayout(actions)
         layout.addWidget(card)
         layout.addStretch(1)
+        return tab
+
+    def _can_mapping_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.addWidget(
+            InlineMessage(
+                "四个电机区域可分别选择 Orin CAN 通道。保存并应用后会断开当前连接并恢复安全锁。",
+                "info",
+            )
+        )
+        card = Card("D7 电机 CAN 映射", "EVT1 与 EVT2 分别保存；升级 CAN 保持使用预设专用通道。")
+        form = QFormLayout()
+        self.mapping_profile = QComboBox()
+        self.mapping_profile.addItems(["EVT2", "EVT1"])
+        self.mapping_profile.currentTextChanged.connect(self._load_mapping_profile)
+        form.addRow("配置方案", self.mapping_profile)
+        self.region_channels: dict[str, QComboBox] = {}
+        for region in CAN_REGIONS:
+            combo = QComboBox()
+            self.region_channels[region] = combo
+            form.addRow(CAN_REGION_LABELS[region], combo)
+        self.ota_channel = QLabel("—")
+        self.ota_channel.setObjectName("Mono")
+        form.addRow("升级专用通道", self.ota_channel)
+        card.body.addLayout(form)
+        actions = QHBoxLayout()
+        restore = QPushButton("恢复当前 EVT 预设")
+        restore.clicked.connect(self._restore_mapping_preset)
+        save = QPushButton("保存并应用映射")
+        save.setProperty("primary", True)
+        save.clicked.connect(self._save_can_mapping)
+        actions.addWidget(restore)
+        actions.addStretch(1)
+        actions.addWidget(save)
+        card.body.addLayout(actions)
+        layout.addWidget(card)
+        layout.addStretch(1)
+        self.mapping_profile.setCurrentText(self.state.evt.variant)
+        self._load_mapping_profile(self.mapping_profile.currentText())
         return tab
 
     def _ssh_tab(self) -> QWidget:
@@ -227,6 +279,60 @@ class SettingsPage(WorkbenchPage):
         self.settings.set_value("zlg/device_index", self.device_index.value())
         self.settings.set_value("zlg/channel", self.channel_index.value())
         self.state.lock("PC CAN 设置已更新，安全锁已恢复")
+
+    def _load_saved_can_mappings(self) -> None:
+        for variant in ("EVT1", "EVT2"):
+            defaults = evt_can_mapping(load_builtin_evt(variant))
+            mapping = {
+                region: str(
+                    self.settings.value(f"can_mapping/{variant}/{region}", defaults[region])
+                ).lower()
+                for region in CAN_REGIONS
+            }
+            try:
+                remap_evt_can(load_builtin_evt(variant), mapping)
+            except EvtConfigError:
+                mapping = defaults
+            self.state.register_evt_can_mapping(variant, mapping)
+
+    def _load_mapping_profile(self, variant: str) -> None:
+        if not hasattr(self, "region_channels") or not variant:
+            return
+        config = load_builtin_evt(variant)
+        defaults = evt_can_mapping(config)
+        ota_bus = next(item.name for item in config.interfaces.values() if item.role == "ota")
+        self.ota_channel.setText(ota_bus.upper())
+        available = [f"can{index}" for index in range(8) if f"can{index}" != ota_bus]
+        for region, combo in self.region_channels.items():
+            saved = str(
+                self.settings.value(f"can_mapping/{variant}/{region}", defaults[region])
+            ).lower()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems([bus.upper() for bus in available])
+            combo.setCurrentText(saved.upper() if saved in available else defaults[region].upper())
+            combo.blockSignals(False)
+
+    def _restore_mapping_preset(self) -> None:
+        variant = self.mapping_profile.currentText()
+        defaults = evt_can_mapping(load_builtin_evt(variant))
+        for region, combo in self.region_channels.items():
+            combo.setCurrentText(defaults[region].upper())
+
+    def _save_can_mapping(self) -> None:
+        variant = self.mapping_profile.currentText()
+        mapping = {
+            region: combo.currentText().lower() for region, combo in self.region_channels.items()
+        }
+        try:
+            remap_evt_can(load_builtin_evt(variant), mapping)
+        except EvtConfigError as exc:
+            QMessageBox.warning(self, "CAN 映射无效", str(exc))
+            return
+        for region, bus in mapping.items():
+            self.settings.set_value(f"can_mapping/{variant}/{region}", bus)
+        self.state.register_evt_can_mapping(variant, mapping)
+        QMessageBox.information(self, "CAN 映射已保存", f"{variant} 的四个电机区域通道已保存。")
 
     def _test_ssh(self) -> None:
         self.state.request(

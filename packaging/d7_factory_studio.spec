@@ -11,6 +11,8 @@ datas = [
     (str(package_root / "config" / "evt2.yaml"), "d7_factory_studio/config"),
     (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
 ]
+for resource in sorted((package_root / "resources").glob("*.svg")):
+    datas.append((str(resource), "d7_factory_studio/resources"))
 
 agent_binary = project_root / "artifacts" / "agent" / "aarch64" / "d7-factory-agent"
 if agent_binary.is_file():

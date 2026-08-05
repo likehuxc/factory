@@ -6,7 +6,6 @@ from PySide6.QtCore import QDateTime, Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QDateTimeEdit,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -23,6 +22,7 @@ from PySide6.QtWidgets import (
 from d7_factory_studio.application import ApplicationState
 from d7_factory_studio.core.models import LinkState
 from d7_factory_studio.settings_store import SettingsStore
+from d7_factory_studio.ui.controls import D7DateTimeEdit as QDateTimeEdit
 from d7_factory_studio.ui.pages.base import InlineMessage, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, PageHeader
 

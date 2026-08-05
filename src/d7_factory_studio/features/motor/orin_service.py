@@ -20,7 +20,7 @@ class OrinMotorService:
 
     def __init__(self, client: AgentRequester) -> None:
         self.client = client
-        self._zero_tokens: dict[tuple[str, int | str], str] = {}
+        self._zero_tokens: dict[tuple[str, tuple[Any, ...]], str] = {}
 
     @staticmethod
     def normalize_target(target: dict[str, Any]) -> dict[str, list[Any]]:
@@ -43,6 +43,13 @@ class OrinMotorService:
 
     def clear_errors(self, target: dict[str, Any]) -> None:
         self.client.request("motor.clear_errors", target=self.normalize_target(target))
+
+    def set_control_authority(self, target: dict[str, Any], owned: bool) -> None:
+        self.client.request(
+            "motor.set_control_authority",
+            target=self.normalize_target(target),
+            args={"owned": bool(owned)},
+        )
 
     def set_mode(self, target: dict[str, Any], mode: str) -> None:
         if mode not in {"position", "velocity"}:
@@ -71,23 +78,23 @@ class OrinMotorService:
 
     def zero_prepare(self, target: dict[str, Any]) -> str:
         normalized = self.normalize_target(target)
-        if "motors" not in normalized or len(normalized["motors"]) != 1:
-            raise ValueError("零位标定只支持单电机")
         response = self.client.request("zero.prepare", target=normalized)
         token = str(response["token"])
-        key = ("motor", int(normalized["motors"][0]))
-        self._zero_tokens[key] = token
+        self._zero_tokens[self._target_key(normalized)] = token
         return token
 
     def zero_commit(self, target: dict[str, Any]) -> None:
         normalized = self.normalize_target(target)
-        if "motors" not in normalized or len(normalized["motors"]) != 1:
-            raise ValueError("零位标定只支持单电机")
-        key = ("motor", int(normalized["motors"][0]))
-        token = self._zero_tokens.pop(key, None)
+        token = self._zero_tokens.pop(self._target_key(normalized), None)
         if not token:
             raise RuntimeError("缺少有效的零位准备令牌")
         self.client.request("zero.commit", args={"token": token})
+
+    @staticmethod
+    def _target_key(normalized: dict[str, list[Any]]) -> tuple[str, tuple[Any, ...]]:
+        if "motors" in normalized:
+            return "motors", tuple(normalized["motors"])
+        return "groups", tuple(normalized["groups"])
 
     def emergency_stop(self, target: dict[str, Any]) -> None:
         # Explicit zero velocity precedes disable; agent also repeats this on EOF/cancel.

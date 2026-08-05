@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from d7_factory_studio.application import ApplicationState
+from d7_factory_studio.core.evt import interface_role_label
 from d7_factory_studio.core.models import LinkState
 from d7_factory_studio.ui.pages.base import WorkbenchPage
 from d7_factory_studio.ui.theme import COLORS
@@ -109,7 +110,7 @@ class HomePage(WorkbenchPage):
             self.bus_table.insertRow(row)
             values = [
                 name.upper(),
-                interface.role.replace("_", " "),
+                interface_role_label(interface.role),
                 "CAN FD" if interface.mode.value == "fd" else "Classic CAN",
                 str(len(self.state.evt.nodes_for_bus(name))),
                 "在线" if self.state.link_state is LinkState.CONNECTED else "未连接",

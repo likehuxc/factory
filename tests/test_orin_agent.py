@@ -80,6 +80,27 @@ def test_zero_calibration_requires_prepare_token() -> None:
     assert client.calls[-1] == ("zero.commit", None, {"token": "zero:r1:1"})
 
 
+def test_zero_calibration_accepts_multiple_fixed_groups_as_motor_ids() -> None:
+    client = FakeAgent()
+    service = OrinMotorService(client)
+    target = {"motors": [1, 2, 7, 8]}
+    assert service.zero_prepare(target) == "zero:r1:1"
+    assert client.calls[-1][1] == {"motors": [1, 2, 7, 8]}
+    service.zero_commit(target)
+    assert client.calls[-1] == ("zero.commit", None, {"token": "zero:r1:1"})
+
+
+def test_control_authority_supports_fixed_group() -> None:
+    client = FakeAgent()
+    service = OrinMotorService(client)
+    service.set_control_authority({"group": "LEFT_ARM_HAND"}, True)
+    assert client.calls[-1] == (
+        "motor.set_control_authority",
+        {"groups": ["LEFT_ARM_HAND"]},
+        {"owned": True},
+    )
+
+
 def test_emergency_stop_orders_zero_before_disable() -> None:
     client = FakeAgent()
     service = OrinMotorService(client)

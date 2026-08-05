@@ -4,23 +4,33 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSpinBox,
+    QSizePolicy,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QWidget,
 )
 
 from d7_factory_studio.application import ApplicationState
+from d7_factory_studio.core.evt import group_label
 from d7_factory_studio.core.models import LinkState
+from d7_factory_studio.ui.controls import (
+    D7ComboBox as QComboBox,
+)
+from d7_factory_studio.ui.controls import (
+    D7DoubleSpinBox as QDoubleSpinBox,
+)
+from d7_factory_studio.ui.controls import (
+    D7SpinBox as QSpinBox,
+)
 from d7_factory_studio.ui.pages.base import FormSection, InlineMessage, LogConsole, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, Metric, PageHeader
 
@@ -29,7 +39,7 @@ def add_motor_targets(combo: QComboBox, state: ApplicationState, include_groups:
     combo.clear()
     if include_groups:
         for group, ids in state.evt.fixed_groups.items():
-            combo.addItem(f"分组 · {group.replace('_', ' ')} ({len(ids)})", ("group", group))
+            combo.addItem(f"分组 · {group_label(group)} ({len(ids)})", ("group", group))
         combo.insertSeparator(combo.count())
     for node in state.evt.nodes:
         combo.addItem(
@@ -98,7 +108,7 @@ class NodeOverviewPage(WorkbenchPage):
                 node.label,
                 f"0x{node.dev_id:02X}",
                 node.bus.upper(),
-                node.group.replace("_", " "),
+                group_label(node.group),
                 str(motor.get("mode", "—")),
                 "在线" if motor else "未连接",
                 str(faults or "—"),
@@ -126,6 +136,8 @@ class CanMotionPage(WorkbenchPage):
     def __init__(self, state: ApplicationState) -> None:
         super().__init__()
         self.state = state
+        self._authority_target: tuple[str, object] | None = None
+        self._pending_authority_target: tuple[str, object] | None = None
         self.layout.addWidget(
             PageHeader("CAN 运动控制", "统一控制单电机或固定分组；速度台架上限固定为 ±0.5 rad/s。")
         )
@@ -138,12 +150,27 @@ class CanMotionPage(WorkbenchPage):
         target_form = FormSection()
         self.target = QComboBox()
         add_motor_targets(self.target, state)
+        self.target.currentIndexChanged.connect(self._authority_target_changed)
         self.mode = QComboBox()
         self.mode.addItem("位置模式", "position")
         self.mode.addItem("速度模式", "velocity")
         target_form.add_field("电机或固定分组", self.target)
         target_form.add_field("工作模式", self.mode)
         target_card.body.addWidget(target_form)
+        authority_actions = QHBoxLayout()
+        self.authority_status = QLabel("控制权：未切换")
+        self.authority_status.setObjectName("Muted")
+        take_control = QPushButton("获取控制权")
+        take_control.clicked.connect(lambda: self._request_control("take_control"))
+        release_control = QPushButton("释放控制权")
+        release_control.clicked.connect(
+            lambda: self._request_control("release_control", require_unlock=False)
+        )
+        authority_actions.addWidget(self.authority_status)
+        authority_actions.addStretch(1)
+        authority_actions.addWidget(release_control)
+        authority_actions.addWidget(take_control)
+        target_card.body.addLayout(authority_actions)
         mode_actions = QHBoxLayout()
         set_mode = QPushButton("切换模式")
         set_mode.clicked.connect(self._set_mode)
@@ -208,6 +235,8 @@ class CanMotionPage(WorkbenchPage):
         state.task_event.connect(self._on_task_event)
 
     def _evt_changed(self) -> None:
+        if self.state.link_state is not LinkState.CONNECTED:
+            self._authority_target = None
         selected = self.target.currentData()
         add_motor_targets(self.target, self.state)
         index = self.target.findData(selected)
@@ -223,17 +252,27 @@ class CanMotionPage(WorkbenchPage):
             return
         if not require_unlock and self.state.link_state is not LinkState.CONNECTED:
             return
+        if operation == "enable" and not self._has_control_authority():
+            QMessageBox.warning(self, "尚未获取控制权", "请先为当前目标获取控制权，再执行使能。")
+            return
+        self._pending_authority_target = self.target.currentData()
         self.state.request(f"motor.{operation}", target=self._target_payload())
         self.state.log("电机", f"已请求{operation}: {self.target.currentText()}")
 
     def _set_mode(self) -> None:
         if not require_motion_ready(self, self.state):
             return
+        if not self._has_control_authority():
+            QMessageBox.warning(self, "尚未获取控制权", "请先为当前目标获取控制权，再切换模式。")
+            return
         self.state.request("motor.set_mode", target=self._target_payload(), mode=self.mode.currentData())
         self.state.lock("模式切换后已恢复安全锁")
 
     def _execute(self) -> None:
         if not require_motion_ready(self, self.state):
+            return
+        if not self._has_control_authority():
+            QMessageBox.warning(self, "尚未获取控制权", "请先为当前目标获取控制权，再发送运动指令。")
             return
         mode = self.mode.currentData()
         args = (
@@ -248,7 +287,34 @@ class CanMotionPage(WorkbenchPage):
         self.state.request("motor.emergency_stop", target=self._target_payload())
         self.state.lock("紧急停止已触发，安全锁已恢复")
 
+    def _authority_target_changed(self) -> None:
+        self.authority_status.setText(
+            "控制权：上位机" if self._has_control_authority() else "控制权：未切换"
+        )
+
+    def _has_control_authority(self) -> bool:
+        return self._authority_target == self.target.currentData()
+
     def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if action in {"motor.take_control", "motor.release_control"} and event == "succeeded":
+            self._authority_target = (
+                self._pending_authority_target if action == "motor.take_control" else None
+            )
+            self._pending_authority_target = None
+            self.authority_status.setText(
+                "控制权：上位机"
+                if action == "motor.take_control" and self._has_control_authority()
+                else "控制权：已释放"
+                if action == "motor.release_control"
+                else "控制权：未切换"
+            )
+            return
+        if action in {"motor.take_control", "motor.release_control"} and event in {
+            "failed",
+            "cancelled",
+        }:
+            self._pending_authority_target = None
+            return
         if action != "motor.state" or event != "event" or not isinstance(payload, dict):
             return
         data = payload.get("data", payload)
@@ -276,6 +342,8 @@ class Serial485Page(WorkbenchPage):
     def __init__(self, state: ApplicationState) -> None:
         super().__init__()
         self.state = state
+        self._authority_comm_id: int | None = None
+        self._pending_authority_comm_id: int | None = None
         self.layout.addWidget(
             PageHeader("485 电机控制", "保留扫描、ID/EEPROM、抱闸、速度、相对位置和循环测试。")
         )
@@ -305,6 +373,7 @@ class Serial485Page(WorkbenchPage):
         identity_form = FormSection()
         self.station_id = QSpinBox()
         self.station_id.setRange(0, 255)
+        self.station_id.valueChanged.connect(self._authority_id_changed)
         self.new_id = QSpinBox()
         self.new_id.setRange(0, 255)
         identity_form.add_field("当前 ID", self.station_id)
@@ -348,6 +417,18 @@ class Serial485Page(WorkbenchPage):
         motion_form.addRow("正/反转时间", self.cycle_run)
         motion_form.addRow("轮次间隔", self.cycle_wait)
         motion.body.addLayout(motion_form)
+        authority_actions = QHBoxLayout()
+        self.authority_status = QLabel("控制权：未切换")
+        self.authority_status.setObjectName("Muted")
+        take_control = QPushButton("获取控制权")
+        take_control.clicked.connect(lambda: self._request("take_control", motion=True))
+        release_control = QPushButton("释放控制权")
+        release_control.clicked.connect(lambda: self._request("release_control"))
+        authority_actions.addWidget(self.authority_status)
+        authority_actions.addStretch(1)
+        authority_actions.addWidget(release_control)
+        authority_actions.addWidget(take_control)
+        motion.body.addLayout(authority_actions)
         motion_actions = QHBoxLayout()
         for label, action in (
             ("使能", "enable"),
@@ -383,6 +464,7 @@ class Serial485Page(WorkbenchPage):
         output.body.addWidget(self.console)
         self.layout.addWidget(output)
         state.task_event.connect(self._on_task_event)
+        state.changed.connect(self._connection_changed)
         self.refresh_ports()
 
     def refresh_ports(self) -> None:
@@ -400,9 +482,14 @@ class Serial485Page(WorkbenchPage):
     def _request(self, operation: str, motion: bool = False) -> None:
         if motion and not require_motion_ready(self, self.state):
             return
+        if motion and operation != "take_control" and self._authority_comm_id != self.station_id.value():
+            QMessageBox.warning(self, "尚未获取控制权", "请先为当前通信 ID 获取控制权。")
+            return
         if self.port.currentData() is None and self.port.currentText() == "未发现串口":
             QMessageBox.warning(self, "无可用串口", "请连接 485 转换器后刷新串口。")
             return
+        if operation in {"take_control", "release_control"}:
+            self._pending_authority_comm_id = self.station_id.value()
         self.state.request(
             f"serial485.{operation}",
             port=self.port.currentText(),
@@ -417,6 +504,17 @@ class Serial485Page(WorkbenchPage):
         )
         self.console.appendPlainText(f"[请求] {operation}")
 
+    def _authority_id_changed(self) -> None:
+        if self._authority_comm_id != self.station_id.value():
+            self.authority_status.setText("控制权：未切换")
+
+    def _connection_changed(self) -> None:
+        if self.state.link_state is LinkState.CONNECTED:
+            return
+        self._authority_comm_id = None
+        self._pending_authority_comm_id = None
+        self.authority_status.setText("控制权：未切换")
+
     def _on_task_event(self, action: str, event: str, payload: object) -> None:
         if not action.startswith("serial485."):
             return
@@ -426,6 +524,18 @@ class Serial485Page(WorkbenchPage):
         if event == "progress" and isinstance(payload, dict):
             self.console.appendPlainText(str(payload.get("message", "")))
         elif event == "succeeded":
+            if action == "serial485.take_control":
+                self._authority_comm_id = self._pending_authority_comm_id
+                self.authority_status.setText(
+                    "控制权：上位机"
+                    if self._authority_comm_id == self.station_id.value()
+                    else "控制权：未切换"
+                )
+            elif action == "serial485.release_control":
+                self._authority_comm_id = None
+                self.authority_status.setText("控制权：已释放")
+            if action in {"serial485.take_control", "serial485.release_control"}:
+                self._pending_authority_comm_id = None
             if action == "serial485.scan" and payload is not None:
                 station = getattr(payload, "station", None)
                 comm_id = getattr(payload, "comm_id", None)
@@ -439,9 +549,13 @@ class Serial485Page(WorkbenchPage):
             else:
                 self.console.appendPlainText(f"[完成] {action.removeprefix('serial485.')}")
         elif event == "failed":
+            if action in {"serial485.take_control", "serial485.release_control"}:
+                self._pending_authority_comm_id = None
             error = payload.get("error", "未知错误") if isinstance(payload, dict) else "未知错误"
             self.console.appendPlainText(f"[失败] {error}")
         elif event == "cancelled":
+            if action in {"serial485.take_control", "serial485.release_control"}:
+                self._pending_authority_comm_id = None
             self.console.appendPlainText("[停止] 任务已取消并发送停止帧")
         if action == "serial485.cycle_start" and event in {"succeeded", "failed", "cancelled"}:
             self.cycle_start.setEnabled(True)
@@ -558,10 +672,29 @@ class ZeroCalibrationPage(WorkbenchPage):
         )
         card = Card("标定目标")
         form = FormSection()
+        self.target_mode = QComboBox()
+        self.target_mode.addItems(["单电机", "多个固定分组"])
+        self.target_mode.currentIndexChanged.connect(self._target_mode_changed)
+        form.add_field("标定范围", self.target_mode)
+        card.body.addWidget(form)
+        self.target_stack = QStackedWidget()
+        self.target_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.target_stack.setMaximumHeight(92)
         self.target = QComboBox()
         add_motor_targets(self.target, state, include_groups=False)
-        form.add_field("单电机", self.target)
-        card.body.addWidget(form)
+        self.target_stack.addWidget(self.target)
+        group_panel = QWidget()
+        group_layout = QGridLayout(group_panel)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.setHorizontalSpacing(18)
+        group_layout.setVerticalSpacing(10)
+        self.group_checks: dict[str, QCheckBox] = {}
+        for index, (group, ids) in enumerate(state.evt.fixed_groups.items()):
+            checkbox = QCheckBox(f"{group_label(group)}（{len(ids)} 个电机）")
+            self.group_checks[group] = checkbox
+            group_layout.addWidget(checkbox, index // 2, index % 2)
+        self.target_stack.addWidget(group_panel)
+        card.body.addWidget(self.target_stack)
         self.mechanical_confirm = QCheckBox("机械位置已人工对准，电机当前处于失能状态")
         self.prepare_confirm = QCheckBox("我已核对设备 ID、总线和关节名称")
         card.body.addWidget(self.mechanical_confirm)
@@ -580,9 +713,29 @@ class ZeroCalibrationPage(WorkbenchPage):
         self.layout.addWidget(card)
         state.task_event.connect(self._on_task_event)
 
-    def _target_payload(self) -> dict[str, int]:
-        _kind, logic_id = self.target.currentData()
-        return {"motor": int(logic_id)}
+    def _target_mode_changed(self, index: int) -> None:
+        self.target_stack.setCurrentIndex(index)
+
+    def _target_payload(self) -> dict[str, object]:
+        if self.target_mode.currentIndex() == 0:
+            _kind, logic_id = self.target.currentData()
+            return {"motor": int(logic_id)}
+        ids = sorted(
+            {
+                logic_id
+                for group, checkbox in self.group_checks.items()
+                if checkbox.isChecked()
+                for logic_id in self.state.evt.fixed_groups.get(group, ())
+            }
+        )
+        return {"motors": ids}
+
+    def _target_text(self) -> str:
+        if self.target_mode.currentIndex() == 0:
+            return self.target.currentText()
+        return "、".join(
+            group_label(group) for group, checkbox in self.group_checks.items() if checkbox.isChecked()
+        )
 
     def _prepare(self) -> None:
         if not require_motion_ready(self, self.state):
@@ -590,7 +743,11 @@ class ZeroCalibrationPage(WorkbenchPage):
         if not self.mechanical_confirm.isChecked() or not self.prepare_confirm.isChecked():
             QMessageBox.warning(self, "确认未完成", "请完成两项现场确认。")
             return
-        self.state.request("motor.zero_prepare", target=self._target_payload())
+        target = self._target_payload()
+        if target.get("motors") == []:
+            QMessageBox.warning(self, "未选择分组", "请至少选择一个需要标定的固定分组。")
+            return
+        self.state.request("motor.zero_prepare", target=target)
         self.prepare.setEnabled(False)
 
     def _commit(self) -> None:
@@ -612,7 +769,7 @@ class ZeroCalibrationPage(WorkbenchPage):
         if action == "motor.zero_prepare":
             if event == "succeeded":
                 self.commit.setEnabled(True)
-                self.state.log("零位", f"标定准备完成: {self.target.currentText()}", "warning")
+                self.state.log("零位", f"标定准备完成: {self._target_text()}", "warning")
             elif event in {"failed", "cancelled"}:
                 self.prepare.setEnabled(True)
         elif action == "motor.zero_commit" and event in {"succeeded", "failed", "cancelled"}:
@@ -631,7 +788,7 @@ class LongTestPage(WorkbenchPage):
         form = FormSection()
         self.target = QComboBox()
         for group, ids in state.evt.fixed_groups.items():
-            self.target.addItem(f"{group.replace('_', ' ')} ({len(ids)})", group)
+            self.target.addItem(f"{group_label(group)} ({len(ids)})", group)
         self.mode = QComboBox()
         self.mode.addItem("位置往返", "position")
         self.mode.addItem("速度正反转", "velocity")

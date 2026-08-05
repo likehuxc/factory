@@ -339,6 +339,10 @@ class ApplicationCoordinator(QObject):
                 return {"present": controller.probe(comm_id), "comm_id": comm_id}
             if operation_name == "write_identity":
                 controller.write_comm_id(int(payload["new_id"]), token)
+            elif operation_name == "take_control":
+                controller.take_control_authority(comm_id, token)
+            elif operation_name == "release_control":
+                controller.release_control_authority(comm_id, token)
             elif operation_name == "enable":
                 controller.set_controlword(comm_id, CONTROLWORD_ENABLE, token)
             elif operation_name == "release_brake":
@@ -404,6 +408,7 @@ class ApplicationCoordinator(QObject):
             "param_save",
             "zero_prepare",
             "zero_commit",
+            "take_control",
             "long_test_start",
         }
         if operation_name in unlocked_operations and self.state.safety_locked:
@@ -413,7 +418,9 @@ class ApplicationCoordinator(QObject):
             if operation_name in {"enable", "disable", "clear_errors"}:
                 getattr(service, operation_name)(target)
                 return {}
-            if operation_name == "set_mode":
+            if operation_name in {"take_control", "release_control"}:
+                service.set_control_authority(target, operation_name == "take_control")
+            elif operation_name == "set_mode":
                 service.set_mode(target, str(payload["mode"]))
             elif operation_name == "set_position":
                 service.set_position(target, float(payload["angle_deg"]))

@@ -5,7 +5,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
-from d7_factory_studio.core.evt import EvtConfig, load_builtin_evt
+from d7_factory_studio.core.evt import EvtConfig, load_builtin_evt, remap_evt_can
 from d7_factory_studio.core.models import ConnectionMode, LinkState
 
 
@@ -20,6 +20,7 @@ class ApplicationState(QObject):
         self.connection_mode = ConnectionMode.PC_DIRECT
         self.link_state = LinkState.DISCONNECTED
         self.evt: EvtConfig = load_builtin_evt("EVT2")
+        self._evt_can_mappings: dict[str, dict[str, str]] = {}
         self.active_interface = self._default_interface()
         self.safety_locked = True
         self.fault_message = ""
@@ -46,6 +47,9 @@ class ApplicationState(QObject):
 
     def set_evt(self, variant: str) -> None:
         config = load_builtin_evt(variant)
+        mapping = self._evt_can_mappings.get(config.variant)
+        if mapping:
+            config = remap_evt_can(config, mapping)
         if config.variant == self.evt.variant:
             return
         should_disconnect = self.link_state is not LinkState.DISCONNECTED
@@ -56,6 +60,26 @@ class ApplicationState(QObject):
         self.online_nodes = 0
         self.fault_message = ""
         self.log("配置", f"已切换到 {config.variant}，连接已断开并恢复安全锁")
+        self.changed.emit()
+        if should_disconnect:
+            self.request("connection.disconnect")
+
+    def register_evt_can_mapping(
+        self, variant: str, mapping: dict[str, str], *, apply_current: bool = True
+    ) -> None:
+        normalized_variant = variant.strip().upper()
+        config = remap_evt_can(load_builtin_evt(normalized_variant), mapping)
+        self._evt_can_mappings[normalized_variant] = dict(mapping)
+        if not apply_current or self.evt.variant != normalized_variant:
+            return
+        should_disconnect = self.link_state is not LinkState.DISCONNECTED
+        self.evt = config
+        self.active_interface = self._default_interface()
+        self.link_state = LinkState.DISCONNECTED
+        self.safety_locked = True
+        self.online_nodes = 0
+        self.fault_message = ""
+        self.log("配置", f"{normalized_variant} CAN 映射已应用，连接已断开并恢复安全锁")
         self.changed.emit()
         if should_disconnect:
             self.request("connection.disconnect")

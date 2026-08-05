@@ -6,8 +6,6 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
-    QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -16,7 +14,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -27,6 +24,15 @@ from PySide6.QtWidgets import (
 from d7_factory_studio.application import ApplicationState
 from d7_factory_studio.core.models import CanFrame, LinkState
 from d7_factory_studio.protocols.machine_info import MACHINE_INFO_FIELDS
+from d7_factory_studio.ui.controls import (
+    D7ComboBox as QComboBox,
+)
+from d7_factory_studio.ui.controls import (
+    D7DoubleSpinBox as QDoubleSpinBox,
+)
+from d7_factory_studio.ui.controls import (
+    D7SpinBox as QSpinBox,
+)
 from d7_factory_studio.ui.pages.base import FormSection, LogConsole, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, PageHeader
 

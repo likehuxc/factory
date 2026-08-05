@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -23,28 +25,31 @@ COLORS = {
 
 def stylesheet() -> str:
     c = COLORS
+    resources = Path(__file__).resolve().parent.parent / "resources"
+    plus_icon = (resources / "spin-plus.svg").as_posix()
+    minus_icon = (resources / "spin-minus.svg").as_posix()
     return f"""
     * {{
         font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
-        font-size: 13px;
+        font-size: 14px;
         color: {c["ink"]};
     }}
     QMainWindow, QWidget#AppRoot {{ background: {c["canvas"]}; }}
     QWidget#PrimarySidebar {{ background: {c["sidebar"]}; }}
     QWidget#SecondarySidebar {{ background: {c["surface"]}; border-right: 1px solid {c["line"]}; }}
     QWidget#TopRail {{ background: {c["surface"]}; border-bottom: 1px solid {c["line"]}; }}
-    QLabel#BrandMark {{ color: white; font-size: 18px; font-weight: 700; }}
-    QLabel#BrandCaption {{ color: #94A5BE; font-size: 10px; font-weight: 600; }}
-    QLabel#PageTitle {{ font-size: 24px; font-weight: 700; }}
-    QLabel#PageCaption {{ color: {c["muted"]}; font-size: 13px; }}
-    QLabel#SectionTitle {{ font-size: 16px; font-weight: 700; }}
-    QLabel#MetricValue {{ font-family: "Bahnschrift", "Segoe UI Variable"; font-size: 26px; font-weight: 600; }}
+    QLabel#BrandMark {{ color: white; font-size: 20px; font-weight: 700; }}
+    QLabel#BrandCaption {{ color: #94A5BE; font-size: 11px; font-weight: 600; }}
+    QLabel#PageTitle {{ font-size: 26px; font-weight: 700; }}
+    QLabel#PageCaption {{ color: {c["muted"]}; font-size: 14px; }}
+    QLabel#SectionTitle {{ font-size: 17px; font-weight: 700; }}
+    QLabel#MetricValue {{ font-family: "Bahnschrift", "Segoe UI Variable"; font-size: 28px; font-weight: 600; }}
     QLabel#Muted {{ color: {c["muted"]}; }}
     QLabel#Mono {{ font-family: "JetBrains Mono", "Cascadia Mono", monospace; }}
     QFrame#Card {{ background: {c["surface"]}; border: 1px solid {c["line"]}; border-radius: 10px; }}
     QFrame#SoftPanel {{ background: {c["surface_muted"]}; border: none; border-radius: 9px; }}
     QPushButton {{
-        min-height: 34px; padding: 0 14px; border-radius: 8px;
+        min-height: 38px; padding: 0 15px; border-radius: 9px;
         border: 1px solid {c["line"]}; background: {c["surface"]}; font-weight: 600;
     }}
     QPushButton:hover {{ border-color: #A9BAD0; background: #F9FBFD; }}
@@ -56,11 +61,34 @@ def stylesheet() -> str:
     QPushButton[danger="true"] {{ color: {c["danger"]}; border-color: #F0BABA; background: #FFF7F7; }}
     QPushButton[ghost="true"] {{ border: none; background: transparent; }}
     QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {{
-        min-height: 34px; padding: 0 9px; border: 1px solid {c["line"]};
-        border-radius: 7px; background: {c["surface"]}; selection-background-color: {c["primary"]};
+        min-height: 38px; padding: 0 10px; border: 1px solid {c["line"]};
+        border-radius: 9px; background: {c["surface"]}; selection-background-color: {c["primary"]};
     }}
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {c["primary"]}; }}
-    QComboBox::drop-down {{ border: none; width: 28px; }}
+    QComboBox::drop-down {{ border: none; width: 32px; }}
+    QComboBox QAbstractItemView {{ padding: 5px; border: 1px solid {c["line"]}; border-radius: 8px; }}
+    QSpinBox, QDoubleSpinBox, QDateTimeEdit {{ padding-right: 38px; }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button, QDateTimeEdit::up-button {{
+        subcontrol-origin: border; subcontrol-position: top right;
+        width: 30px; background: {c["primary_soft"]};
+        border: none; border-left: 1px solid #C9D8F2; border-bottom: 1px solid #D7E2F4;
+        border-top-right-radius: 8px;
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button, QDateTimeEdit::down-button {{
+        subcontrol-origin: border; subcontrol-position: bottom right;
+        width: 30px; background: {c["primary_soft"]};
+        border: none; border-left: 1px solid #C9D8F2;
+        border-bottom-right-radius: 8px;
+    }}
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+    QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover,
+    QDateTimeEdit::up-button:hover, QDateTimeEdit::down-button:hover {{ background: #DCE8FF; }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow, QDateTimeEdit::up-arrow {{
+        image: url("{plus_icon}"); width: 12px; height: 12px;
+    }}
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow, QDateTimeEdit::down-arrow {{
+        image: url("{minus_icon}"); width: 12px; height: 12px;
+    }}
     QTableView, QTableWidget {{
         background: {c["surface"]}; alternate-background-color: #F8FAFD;
         border: 1px solid {c["line"]}; border-radius: 8px; gridline-color: #E9EEF5;

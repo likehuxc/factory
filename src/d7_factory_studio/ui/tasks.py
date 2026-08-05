@@ -83,8 +83,11 @@ class TaskManager(QObject):
         token.cancel()
         return True
 
-    def cancel_all(self) -> None:
-        for token in tuple(self._tokens.values()):
+    def cancel_all(self, *, exclude: set[str] | None = None) -> None:
+        excluded = exclude or set()
+        for task_id, token in tuple(self._tokens.items()):
+            if task_id in excluded:
+                continue
             token.cancel()
 
     def is_running(self, task_id: str) -> bool:

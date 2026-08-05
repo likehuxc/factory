@@ -16,6 +16,9 @@ from typing import Any
 
 import paramiko
 
+from d7_factory_studio.core.models import CanFrame, CanMode
+from d7_factory_studio.core.ports import CanTransport
+
 MAX_JSONL_BYTES = 1024 * 1024
 
 
@@ -76,6 +79,7 @@ class OrinAgentClient:
 
     def __init__(self, on_event: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.on_event = on_event
+        self._event_listeners: list[Callable[[dict[str, Any]], None]] = []
         self._transport: paramiko.Transport | None = None
         self._channel: paramiko.Channel | None = None
         self._pending: dict[str, queue.Queue[dict[str, Any] | BaseException]] = {}
@@ -101,6 +105,7 @@ class OrinAgentClient:
         username: str,
         password: str,
         expected_fingerprint: str,
+        known_hosts_path: Path | None = None,
         timeout_s: float = 10.0,
     ) -> None:
         self.close()
@@ -119,6 +124,14 @@ class OrinAgentClient:
             transport.auth_password(username=username, password=password, fallback=False)
             if not transport.is_authenticated():
                 raise AgentProtocolError("SSH 身份验证失败")
+            if known_hosts_path is not None:
+                known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+                host_keys = paramiko.HostKeys()
+                if known_hosts_path.is_file():
+                    host_keys.load(str(known_hosts_path))
+                host_label = host if port == 22 else f"[{host}]:{port}"
+                host_keys.add(host_label, key.get_name(), key)
+                host_keys.save(str(known_hosts_path))
         except Exception:
             transport.close()
             raise
@@ -190,12 +203,24 @@ class OrinAgentClient:
             raise AgentProtocolError(f"agent 上传后 SHA-256 校验失败: {stderr.strip()}")
         return local_hash.hexdigest()
 
-    def start(self, remote_binary: str, remote_config: str) -> dict[str, Any]:
+    def start(
+        self,
+        remote_binary: str,
+        remote_config: str,
+        remote_library_path: str | None = None,
+    ) -> dict[str, Any]:
         transport = self._require_transport()
         if self.is_running:
             raise RuntimeError("agent 已在运行")
         channel = transport.open_session(timeout=10.0)
-        command = f"exec {shlex.quote(remote_binary)} --config {shlex.quote(remote_config)}"
+        environment = (
+            f"env LD_LIBRARY_PATH={shlex.quote(remote_library_path)} "
+            if remote_library_path
+            else ""
+        )
+        command = (
+            f"exec {environment}{shlex.quote(remote_binary)} --config {shlex.quote(remote_config)}"
+        )
         channel.exec_command(command)
         self._channel = channel
         self._stop.clear()
@@ -255,6 +280,14 @@ class OrinAgentClient:
             with self._pending_lock:
                 self._pending.pop(identifier, None)
 
+    def add_event_listener(self, listener: Callable[[dict[str, Any]], None]) -> None:
+        if listener not in self._event_listeners:
+            self._event_listeners.append(listener)
+
+    def remove_event_listener(self, listener: Callable[[dict[str, Any]], None]) -> None:
+        with contextlib.suppress(ValueError):
+            self._event_listeners.remove(listener)
+
     def cancel(self, request_id: str) -> None:
         if not self.is_running:
             return
@@ -304,6 +337,8 @@ class OrinAgentClient:
             return
         if self.on_event is not None:
             self.on_event(message)
+        for listener in tuple(self._event_listeners):
+            listener(message)
 
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(0.5):
@@ -332,3 +367,94 @@ class OrinAgentClient:
         if not self.is_running or self._channel is None:
             raise AgentProtocolError("agent 尚未运行")
         return self._channel
+
+
+class AgentCanTransport(CanTransport):
+    """Synchronous CAN transport adapter over d7-factory-agent events."""
+
+    def __init__(self, client: OrinAgentClient, bus: str, queue_size: int = 4096) -> None:
+        self.client = client
+        self.bus = bus
+        self.queue_size = queue_size
+        self._frames: queue.Queue[CanFrame] = queue.Queue(maxsize=queue_size)
+        self._open = False
+        self._mode = CanMode.FD
+
+    @property
+    def is_open(self) -> bool:
+        return self._open and self.client.is_running
+
+    def open(self, channel: int = 0, mode: CanMode = CanMode.FD) -> None:
+        del channel
+        if self.is_open:
+            return
+        self._mode = CanMode(mode)
+        self.client.add_event_listener(self._on_event)
+        try:
+            self.client.request("can.subscribe")
+        except Exception:
+            self.client.remove_event_listener(self._on_event)
+            raise
+        self._open = True
+
+    def close(self) -> None:
+        if self._open and self.client.is_running:
+            with contextlib.suppress(AgentProtocolError, AgentOperationError, TimeoutError):
+                self.client.request("can.unsubscribe", timeout_s=3.0)
+        self.client.remove_event_listener(self._on_event)
+        self._open = False
+        while not self._frames.empty():
+            with contextlib.suppress(queue.Empty):
+                self._frames.get_nowait()
+
+    def send(self, frame: CanFrame) -> None:
+        if not self.is_open:
+            raise AgentProtocolError("远程 CAN 尚未打开")
+        if frame.is_fd and self._mode is CanMode.CLASSIC:
+            raise ValueError("Classic CAN 接口不能发送 CAN FD 帧")
+        self.client.request(
+            "can.send",
+            args={
+                "unsafe": True,
+                "bus": self.bus,
+                "id": frame.arbitration_id,
+                "is_fd": frame.is_fd,
+                "data": list(frame.data),
+            },
+        )
+
+    def receive(self, timeout_ms: int = 50) -> list[CanFrame]:
+        if not self.is_open:
+            raise AgentProtocolError("远程 CAN 尚未打开")
+        frames: list[CanFrame] = []
+        timeout_s = max(0, timeout_ms) / 1000
+        try:
+            frames.append(self._frames.get(timeout=timeout_s))
+        except queue.Empty:
+            return []
+        while True:
+            try:
+                frames.append(self._frames.get_nowait())
+            except queue.Empty:
+                return frames
+
+    def _on_event(self, message: dict[str, Any]) -> None:
+        if message.get("type") != "can.frame" or message.get("bus") != self.bus:
+            return
+        try:
+            frame = CanFrame(
+                arbitration_id=int(message["id"]),
+                data=bytes(int(value) for value in message.get("data", [])),
+                is_fd=bool(message.get("is_fd", True)),
+                bitrate_switch=bool(message.get("is_fd", True)),
+                timestamp=float(message.get("mono_ms", 0)) / 1000,
+            )
+        except (KeyError, TypeError, ValueError):
+            return
+        try:
+            self._frames.put_nowait(frame)
+        except queue.Full:
+            with contextlib.suppress(queue.Empty):
+                self._frames.get_nowait()
+            with contextlib.suppress(queue.Full):
+                self._frames.put_nowait(frame)

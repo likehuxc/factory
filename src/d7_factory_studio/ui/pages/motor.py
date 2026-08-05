@@ -52,6 +52,7 @@ class NodeOverviewPage(WorkbenchPage):
     def __init__(self, state: ApplicationState) -> None:
         super().__init__()
         self.state = state
+        self._motor_states: dict[int, dict[str, object]] = {}
         self.layout.addWidget(
             PageHeader("电机节点总览", "按当前 EVT 拓扑查看 30 个 D7 节点、总线归属与实时状态。")
         )
@@ -79,6 +80,7 @@ class NodeOverviewPage(WorkbenchPage):
         table_card.body.addWidget(self.table)
         self.layout.addWidget(table_card)
         state.changed.connect(self.refresh)
+        state.task_event.connect(self._on_task_event)
         self.refresh()
 
     def refresh(self) -> None:
@@ -89,21 +91,35 @@ class NodeOverviewPage(WorkbenchPage):
         for node in self.state.evt.nodes:
             row = self.table.rowCount()
             self.table.insertRow(row)
+            motor = self._motor_states.get(node.logic_id, {})
+            faults = motor.get("faults", motor.get("fault", motor.get("errors", "—")))
             values = [
                 str(node.logic_id),
                 node.label,
                 f"0x{node.dev_id:02X}",
                 node.bus.upper(),
                 node.group.replace("_", " "),
-                "—",
-                "未连接",
-                "—",
+                str(motor.get("mode", "—")),
+                "在线" if motor else "未连接",
+                str(faults or "—"),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column in {0, 2, 3}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row, column, item)
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if action != "motor.state" or event != "event" or not isinstance(payload, dict):
+            return
+        data = payload.get("data", payload)
+        motors = data.get("motors", []) if isinstance(data, dict) else []
+        self._motor_states = {
+            int(item.get("logic_id", item.get("id"))): item
+            for item in motors
+            if isinstance(item, dict) and item.get("logic_id", item.get("id")) is not None
+        }
+        self.refresh()
 
 
 class CanMotionPage(WorkbenchPage):
@@ -189,6 +205,7 @@ class CanMotionPage(WorkbenchPage):
         state_card.body.addWidget(self.status_table)
         self.layout.addWidget(state_card)
         state.changed.connect(self._evt_changed)
+        state.task_event.connect(self._on_task_event)
 
     def _evt_changed(self) -> None:
         selected = self.target.currentData()
@@ -230,6 +247,29 @@ class CanMotionPage(WorkbenchPage):
     def _emergency_stop(self) -> None:
         self.state.request("motor.emergency_stop", target=self._target_payload())
         self.state.lock("紧急停止已触发，安全锁已恢复")
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if action != "motor.state" or event != "event" or not isinstance(payload, dict):
+            return
+        data = payload.get("data", payload)
+        motors = data.get("motors", []) if isinstance(data, dict) else []
+        self.status_table.setRowCount(0)
+        for motor in motors:
+            if not isinstance(motor, dict):
+                continue
+            row = self.status_table.rowCount()
+            self.status_table.insertRow(row)
+            values = (
+                motor.get("label", motor.get("logic_id", motor.get("id", "—"))),
+                motor.get("mode", "—"),
+                motor.get("position_rad", motor.get("position", "—")),
+                motor.get("velocity_rad_s", motor.get("velocity", "—")),
+                motor.get("current_a", motor.get("current", "—")),
+                motor.get("temperature_c", motor.get("temperature", "—")),
+                motor.get("faults", motor.get("fault", motor.get("errors", "—"))),
+            )
+            for column, value in enumerate(values):
+                self.status_table.setItem(row, column, QTableWidgetItem(str(value)))
 
 
 class Serial485Page(WorkbenchPage):
@@ -291,8 +331,22 @@ class Serial485Page(WorkbenchPage):
         self.relative.setRange(-360.0, 360.0)
         self.relative.setDecimals(2)
         self.relative.setSuffix(" °")
+        self.cycle_count = QSpinBox()
+        self.cycle_count.setRange(1, 100000)
+        self.cycle_count.setValue(100)
+        self.cycle_run = QDoubleSpinBox()
+        self.cycle_run.setRange(0.1, 3600)
+        self.cycle_run.setValue(5.0)
+        self.cycle_run.setSuffix(" s")
+        self.cycle_wait = QDoubleSpinBox()
+        self.cycle_wait.setRange(0, 3600)
+        self.cycle_wait.setValue(10.0)
+        self.cycle_wait.setSuffix(" s")
         motion_form.addRow("速度", self.speed)
         motion_form.addRow("相对角度", self.relative)
+        motion_form.addRow("循环次数", self.cycle_count)
+        motion_form.addRow("正/反转时间", self.cycle_run)
+        motion_form.addRow("轮次间隔", self.cycle_wait)
         motion.body.addLayout(motion_form)
         motion_actions = QHBoxLayout()
         for label, action in (
@@ -310,12 +364,25 @@ class Serial485Page(WorkbenchPage):
         motion_actions.addStretch(1)
         motion_actions.addWidget(stop)
         motion.body.addLayout(motion_actions)
+        cycle_actions = QHBoxLayout()
+        self.cycle_stop = QPushButton("停止循环")
+        self.cycle_stop.setProperty("danger", True)
+        self.cycle_stop.setEnabled(False)
+        self.cycle_stop.clicked.connect(lambda: self.state.request("serial485.cycle_cancel"))
+        self.cycle_start = QPushButton("开始循环测试")
+        self.cycle_start.setProperty("primary", True)
+        self.cycle_start.clicked.connect(lambda: self._request("cycle_start", motion=True))
+        cycle_actions.addStretch(1)
+        cycle_actions.addWidget(self.cycle_stop)
+        cycle_actions.addWidget(self.cycle_start)
+        motion.body.addLayout(cycle_actions)
         self.layout.addWidget(motion)
 
         output = Card("485 日志")
         self.console = LogConsole()
         output.body.addWidget(self.console)
         self.layout.addWidget(output)
+        state.task_event.connect(self._on_task_event)
         self.refresh_ports()
 
     def refresh_ports(self) -> None:
@@ -344,8 +411,41 @@ class Serial485Page(WorkbenchPage):
             new_id=self.new_id.value(),
             rad_s=self.speed.value(),
             angle_deg=self.relative.value(),
+            cycles=self.cycle_count.value(),
+            run_seconds=self.cycle_run.value(),
+            round_wait_seconds=self.cycle_wait.value(),
         )
         self.console.appendPlainText(f"[请求] {operation}")
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if not action.startswith("serial485."):
+            return
+        if action == "serial485.cycle_start" and event == "started":
+            self.cycle_start.setEnabled(False)
+            self.cycle_stop.setEnabled(True)
+        if event == "progress" and isinstance(payload, dict):
+            self.console.appendPlainText(str(payload.get("message", "")))
+        elif event == "succeeded":
+            if action == "serial485.scan" and payload is not None:
+                station = getattr(payload, "station", None)
+                comm_id = getattr(payload, "comm_id", None)
+                if station is not None:
+                    self.station_id.setValue(int(comm_id))
+                    self.console.appendPlainText(
+                        f"[发现] 站号 0x{int(station):02X} · 通信 ID 0x{int(comm_id):02X}"
+                    )
+                else:
+                    self.console.appendPlainText("[完成] 未发现设备")
+            else:
+                self.console.appendPlainText(f"[完成] {action.removeprefix('serial485.')}")
+        elif event == "failed":
+            error = payload.get("error", "未知错误") if isinstance(payload, dict) else "未知错误"
+            self.console.appendPlainText(f"[失败] {error}")
+        elif event == "cancelled":
+            self.console.appendPlainText("[停止] 任务已取消并发送停止帧")
+        if action == "serial485.cycle_start" and event in {"succeeded", "failed", "cancelled"}:
+            self.cycle_start.setEnabled(True)
+            self.cycle_stop.setEnabled(False)
 
 
 class ParameterPage(WorkbenchPage):
@@ -370,11 +470,11 @@ class ParameterPage(WorkbenchPage):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         rows = [
-            ("position_kp", "—", "", "", "未读取"),
-            ("velocity_kp", "—", "", "", "未读取"),
-            ("current_limit", "—", "", "A", "未读取"),
-            ("temperature_limit", "—", "", "°C", "未读取"),
-            ("zero_offset", "—", "", "rad", "未读取"),
+            ("communication_timeout_ms", "—", "", "ms", "未读取"),
+            ("permission", "—", "", "", "未读取"),
+            ("alarm_mask", "—", "", "bitmask", "未读取"),
+            ("max_speed_rpm", "—", "", "rpm", "未读取"),
+            ("function_switch_mask", "—", "", "bitmask", "未读取"),
         ]
         for row, values in enumerate(rows):
             for column, value in enumerate(values):
@@ -394,6 +494,7 @@ class ParameterPage(WorkbenchPage):
         actions.addWidget(save)
         target_card.body.addLayout(actions)
         self.layout.addWidget(target_card)
+        state.task_event.connect(self._on_task_event)
 
     def _payload(self) -> dict[str, object]:
         kind, value = self.target.currentData()
@@ -418,6 +519,29 @@ class ParameterPage(WorkbenchPage):
             == QMessageBox.StandardButton.Yes
         ):
             self.state.request("motor.param_save", **self._payload())
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if not action.startswith("motor.param_"):
+            return
+        if event == "failed":
+            error = payload.get("error", "失败") if isinstance(payload, dict) else "失败"
+            for row in range(self.table.rowCount()):
+                self.table.item(row, 4).setText(str(error))
+            return
+        if event != "succeeded" or not isinstance(payload, dict):
+            return
+        for row in range(self.table.rowCount()):
+            name = self.table.item(row, 0).text()
+            if action == "motor.param_read" and name in payload:
+                value = payload[name]
+                if isinstance(value, dict):
+                    value = value.get("value", value.get("data", value))
+                self.table.item(row, 1).setText(str(value))
+                self.table.item(row, 4).setText("已读取")
+            elif action == "motor.param_write" and name in payload.get("written", []):
+                self.table.item(row, 4).setText("已写入 RAM")
+            elif action == "motor.param_save":
+                self.table.item(row, 4).setText("已保存 Flash")
 
 
 class ZeroCalibrationPage(WorkbenchPage):
@@ -454,6 +578,7 @@ class ZeroCalibrationPage(WorkbenchPage):
         actions.addWidget(self.commit)
         card.body.addLayout(actions)
         self.layout.addWidget(card)
+        state.task_event.connect(self._on_task_event)
 
     def _target_payload(self) -> dict[str, int]:
         _kind, logic_id = self.target.currentData()
@@ -466,8 +591,7 @@ class ZeroCalibrationPage(WorkbenchPage):
             QMessageBox.warning(self, "确认未完成", "请完成两项现场确认。")
             return
         self.state.request("motor.zero_prepare", target=self._target_payload())
-        self.commit.setEnabled(True)
-        self.state.log("零位", f"标定准备完成: {self.target.currentText()}", "warning")
+        self.prepare.setEnabled(False)
 
     def _commit(self) -> None:
         if (
@@ -483,6 +607,17 @@ class ZeroCalibrationPage(WorkbenchPage):
         self.state.request("motor.zero_commit", target=self._target_payload())
         self.commit.setEnabled(False)
         self.state.lock("零位标定完成，安全锁已恢复")
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if action == "motor.zero_prepare":
+            if event == "succeeded":
+                self.commit.setEnabled(True)
+                self.state.log("零位", f"标定准备完成: {self.target.currentText()}", "warning")
+            elif event in {"failed", "cancelled"}:
+                self.prepare.setEnabled(True)
+        elif action == "motor.zero_commit" and event in {"succeeded", "failed", "cancelled"}:
+            self.prepare.setEnabled(True)
+            self.commit.setEnabled(False)
 
 
 class LongTestPage(WorkbenchPage):
@@ -538,6 +673,7 @@ class LongTestPage(WorkbenchPage):
         self.console = LogConsole()
         logs.body.addWidget(self.console)
         self.layout.addWidget(logs)
+        state.task_event.connect(self._on_task_event)
 
     def _start(self) -> None:
         if not require_motion_ready(self, self.state):
@@ -556,5 +692,21 @@ class LongTestPage(WorkbenchPage):
     def _stop(self) -> None:
         self.state.request("motor.long_test_cancel")
         self.state.lock("长测已停止，安全锁已恢复")
-        self.start.setEnabled(True)
         self.stop.setEnabled(False)
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if action != "motor.long_test_start":
+            return
+        if event == "progress" and isinstance(payload, dict):
+            self.progress.setValue(int(payload.get("progress", 0)))
+            self.console.appendPlainText(str(payload.get("message", "")))
+        elif event in {"succeeded", "failed", "cancelled"}:
+            self.start.setEnabled(True)
+            self.stop.setEnabled(False)
+            if event == "succeeded":
+                self.progress.setValue(100)
+                self.console.appendPlainText("[完成] 长测计划执行完成")
+            elif event == "failed" and isinstance(payload, dict):
+                self.console.appendPlainText(f"[失败] {payload.get('error', '未知错误')}")
+            else:
+                self.console.appendPlainText("[停止] 已零速并失能目标组")

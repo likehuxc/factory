@@ -41,6 +41,7 @@ class LogsPage(WorkbenchPage):
         tabs.addTab(self._reports_tab(), "诊断报告")
         self.layout.addWidget(tabs)
         state.activity_added.connect(self.add_activity)
+        state.task_event.connect(self._on_task_event)
 
     def _activity_tab(self) -> QWidget:
         tab = QWidget()
@@ -166,3 +167,35 @@ class LogsPage(WorkbenchPage):
         path = self.settings.report_directory
         path.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(path.as_uri())
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if action == "device_logs.list" and event == "succeeded" and isinstance(payload, dict):
+            rows = payload.get("rows", [])
+            self.device_table.setRowCount(0)
+            for row_data in rows:
+                if not isinstance(row_data, dict):
+                    continue
+                row = self.device_table.rowCount()
+                self.device_table.insertRow(row)
+                values = (
+                    row_data.get("name", ""),
+                    row_data.get("relative_path", ""),
+                    f"{int(row_data.get('size_bytes', 0)):,}",
+                    row_data.get("modified_iso", ""),
+                    "待下载",
+                )
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    if column == 1:
+                        item.setData(Qt.ItemDataRole.UserRole, row_data.get("remote_path", ""))
+                    self.device_table.setItem(row, column, item)
+        elif action == "device_logs.download" and event == "succeeded" and isinstance(payload, dict):
+            QMessageBox.information(
+                self,
+                "下载完成",
+                f"成功 {payload.get('downloaded_count', 0)}，失败 {payload.get('failed_count', 0)}。\n"
+                f"Manifest: {payload.get('manifest_path', '')}",
+            )
+        elif action.startswith("device_logs.") and event == "failed":
+            error = payload.get("error", "未知错误") if isinstance(payload, dict) else "未知错误"
+            QMessageBox.critical(self, "设备日志任务失败", str(error))

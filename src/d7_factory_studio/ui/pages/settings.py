@@ -34,10 +34,12 @@ class SettingsPage(WorkbenchPage):
         tabs = QTabWidget()
         tabs.addTab(self._pc_tab(), "PC CAN")
         tabs.addTab(self._ssh_tab(), "Orin SSH")
+        tabs.addTab(self._diagnostics_tab(), "网络诊断")
         tabs.addTab(self._paths_tab(), "文件与报告")
         tabs.addTab(self._safety_tab(), "安全")
         tabs.addTab(self._about_tab(), "关于")
         self.layout.addWidget(tabs)
+        state.task_event.connect(self._on_task_event)
 
     def _pc_tab(self) -> QWidget:
         tab = QWidget()
@@ -69,6 +71,7 @@ class SettingsPage(WorkbenchPage):
         actions.addWidget(save)
         card.body.addLayout(actions)
         layout.addWidget(card)
+        layout.addStretch(1)
         return tab
 
     def _ssh_tab(self) -> QWidget:
@@ -89,11 +92,22 @@ class SettingsPage(WorkbenchPage):
             self.password.setText(saved_password)
         self.known_host = QLineEdit(str(self.settings.value("ssh/fingerprint", "")))
         self.known_host.setPlaceholderText("首次连接后确认并保存主机指纹")
+        self.agent_binary = QLineEdit(str(self.settings.value("ssh/agent_binary", "")))
+        self.agent_binary.setPlaceholderText("可选：Linux ARM64 d7-factory-agent")
+        self.agent_config = QLineEdit(str(self.settings.value("ssh/agent_config", "")))
+        self.agent_config.setPlaceholderText("可选：已验证机械限位的 D7 agent YAML")
+        self.agent_library_dir = QLineEdit(
+            str(self.settings.value("ssh/agent_library_dir", ""))
+        )
+        self.agent_library_dir.setPlaceholderText("可选：ARM64 .so 依赖目录")
         form.addRow("主机", self.host)
         form.addRow("端口", self.port)
         form.addRow("用户名", self.username)
         form.addRow("密码", self.password)
         form.addRow("主机指纹", self.known_host)
+        form.addRow("ARM64 agent", self._file_picker(self.agent_binary, "选择 ARM64 agent"))
+        form.addRow("D7 agent YAML", self._file_picker(self.agent_config, "选择 D7 agent 配置"))
+        form.addRow("ARM64 依赖库", self._dir_picker(self.agent_library_dir))
         card.body.addLayout(form)
         actions = QHBoxLayout()
         test = QPushButton("测试连接")
@@ -106,6 +120,7 @@ class SettingsPage(WorkbenchPage):
         actions.addWidget(save)
         card.body.addLayout(actions)
         layout.addWidget(card)
+        layout.addStretch(1)
         return tab
 
     def _paths_tab(self) -> QWidget:
@@ -133,6 +148,43 @@ class SettingsPage(WorkbenchPage):
         save.clicked.connect(self._save_paths)
         card.body.addWidget(save)
         layout.addWidget(card)
+        layout.addStretch(1)
+        return tab
+
+    def _diagnostics_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 12, 0, 0)
+        card = Card(
+            "ADB 网络转发",
+            "仅在诊断页明确确认后使用；会修改 RK3588 路由/iptables 与 Orin 默认路由。",
+        )
+        form = QFormLayout()
+        self.adb_path = QLineEdit(str(self.settings.value("diagnostics/adb_path", "")))
+        self.adb_serial = QLineEdit(str(self.settings.value("diagnostics/adb_serial", "")))
+        self.rk_wlan = QLineEdit(str(self.settings.value("diagnostics/rk_wlan", "wlan0")))
+        self.rk_ethernet = QLineEdit(str(self.settings.value("diagnostics/rk_ethernet", "eth0")))
+        self.orin_ethernet = QLineEdit(
+            str(self.settings.value("diagnostics/orin_ethernet", "eth0"))
+        )
+        self.orin_ip = QLineEdit(str(self.settings.value("diagnostics/orin_ip", "10.254.254.1")))
+        self.forward_port = QSpinBox()
+        self.forward_port.setRange(1, 65535)
+        self.forward_port.setValue(int(self.settings.value("diagnostics/forward_port", 22)))
+        form.addRow("ADB", self._file_picker(self.adb_path, "选择 adb.exe"))
+        form.addRow("ADB serial", self.adb_serial)
+        form.addRow("RK Wi-Fi 接口", self.rk_wlan)
+        form.addRow("RK 有线接口", self.rk_ethernet)
+        form.addRow("Orin 有线接口", self.orin_ethernet)
+        form.addRow("Orin IP", self.orin_ip)
+        form.addRow("转发端口", self.forward_port)
+        card.body.addLayout(form)
+        save = QPushButton("保存网络诊断设置")
+        save.setProperty("primary", True)
+        save.clicked.connect(self._save_diagnostics)
+        card.body.addWidget(save)
+        layout.addWidget(card)
+        layout.addStretch(1)
         return tab
 
     def _safety_tab(self) -> QWidget:
@@ -148,20 +200,16 @@ class SettingsPage(WorkbenchPage):
         self.allow_dmesg_clear = QCheckBox("允许诊断页显示 dmesg -C 操作（执行时仍需二次确认）")
         self.allow_raw_can = QCheckBox("允许整机页发送原始 CAN 帧（执行时仍需二次确认）")
         self.allow_dmesg_clear.setChecked(
-            bool(
-                self.settings.value(
-                    "safety/allow_dmesg_clear",
-                    False,
-                )
-            )
+            self.settings.bool_value("safety/allow_dmesg_clear")
         )
-        self.allow_raw_can.setChecked(bool(self.settings.value("safety/allow_raw_can", False)))
+        self.allow_raw_can.setChecked(self.settings.bool_value("safety/allow_raw_can"))
         card.body.addWidget(self.allow_dmesg_clear)
         card.body.addWidget(self.allow_raw_can)
         save = QPushButton("保存安全选项")
         save.clicked.connect(self._save_safety)
         card.body.addWidget(save)
         layout.addWidget(card)
+        layout.addStretch(1)
         return tab
 
     def _about_tab(self) -> QWidget:
@@ -198,6 +246,9 @@ class SettingsPage(WorkbenchPage):
         self.settings.set_value("ssh/port", self.port.value())
         self.settings.set_value("ssh/username", self.username.text().strip())
         self.settings.set_value("ssh/fingerprint", self.known_host.text().strip())
+        self.settings.set_value("ssh/agent_binary", self.agent_binary.text().strip())
+        self.settings.set_value("ssh/agent_config", self.agent_config.text().strip())
+        self.settings.set_value("ssh/agent_library_dir", self.agent_library_dir.text().strip())
         if self.password.text():
             try:
                 self.settings.set_ssh_password(
@@ -213,10 +264,78 @@ class SettingsPage(WorkbenchPage):
         if path:
             editor.setText(path)
 
+    def _file_picker(self, editor: QLineEdit, caption: str) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        choose = QPushButton("选择")
+        choose.clicked.connect(
+            lambda: self._choose_file(editor, caption)
+        )
+        layout.addWidget(editor, 1)
+        layout.addWidget(choose)
+        return container
+
+    def _dir_picker(self, editor: QLineEdit) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        choose = QPushButton("选择")
+        choose.clicked.connect(lambda: self._choose_dir(editor))
+        layout.addWidget(editor, 1)
+        layout.addWidget(choose)
+        return container
+
+    def _choose_file(self, editor: QLineEdit, caption: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, caption, editor.text())
+        if path:
+            editor.setText(path)
+
     def _save_paths(self) -> None:
         self.settings.set_value("paths/reports", self.reports.text())
         self.settings.set_value("paths/downloads", self.downloads.text())
 
+    def _save_diagnostics(self) -> None:
+        values = {
+            "diagnostics/adb_path": self.adb_path.text().strip(),
+            "diagnostics/adb_serial": self.adb_serial.text().strip(),
+            "diagnostics/rk_wlan": self.rk_wlan.text().strip(),
+            "diagnostics/rk_ethernet": self.rk_ethernet.text().strip(),
+            "diagnostics/orin_ethernet": self.orin_ethernet.text().strip(),
+            "diagnostics/orin_ip": self.orin_ip.text().strip(),
+            "diagnostics/forward_port": self.forward_port.value(),
+        }
+        for key, value in values.items():
+            self.settings.set_value(key, value)
+        self.state.lock("网络诊断设置已更新，安全锁已恢复")
+
     def _save_safety(self) -> None:
         self.settings.set_value("safety/allow_dmesg_clear", self.allow_dmesg_clear.isChecked())
         self.settings.set_value("safety/allow_raw_can", self.allow_raw_can.isChecked())
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if action == "settings.zlg_scan" and event == "succeeded":
+            self.dll_path.setText(str(payload))
+            QMessageBox.information(self, "驱动验证通过", f"已选择 64 位 ControlCANFD.dll：\n{payload}")
+        elif action == "settings.ssh_test" and event == "succeeded" and isinstance(payload, dict):
+            if payload.get("requires_confirmation") == "true":
+                fingerprint = str(payload.get("fingerprint", ""))
+                if (
+                    QMessageBox.question(
+                        self,
+                        "确认 SSH 主机指纹",
+                        f"首次连接 {payload.get('host', '')}。请与设备侧核对后确认：\n\n{fingerprint}\n\n"
+                        "确认后仍需保存 SSH 设置并重新测试。",
+                    )
+                    == QMessageBox.StandardButton.Yes
+                ):
+                    self.known_host.setText(fingerprint)
+            else:
+                QMessageBox.information(
+                    self, "SSH 连接成功", f"远端主机：{payload.get('hostname', '')}"
+                )
+        elif action.startswith("settings.") and event == "failed":
+            error = payload.get("error", "未知错误") if isinstance(payload, dict) else "未知错误"
+            QMessageBox.critical(self, "设置检查失败", str(error))

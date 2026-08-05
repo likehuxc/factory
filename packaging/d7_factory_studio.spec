@@ -4,7 +4,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 
-project_root = Path(SPECPATH).resolve().parent
+project_root = Path(SPECPATH).resolve().parent.parent
 package_root = project_root / "src" / "d7_factory_studio"
 datas = [
     (str(package_root / "config" / "evt1.yaml"), "d7_factory_studio/config"),

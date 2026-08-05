@@ -42,6 +42,7 @@ class DiagnosticsPage(WorkbenchPage):
         tabs.addTab(self._timing_tab(), "位时序 / TDC")
         self.layout.addWidget(tabs)
         state.changed.connect(self._rebuild_interfaces)
+        state.task_event.connect(self._on_task_event)
         self._rebuild_interfaces()
 
     def _stress_tab(self) -> QWidget:
@@ -194,7 +195,13 @@ class DiagnosticsPage(WorkbenchPage):
         layout.addWidget(calculator)
         tdc = Card("TDC / TDCR", "计算只给出建议，不会隐式写入 Orin 控制器。")
         calculate_tdc = QPushButton("计算 TDC 建议")
-        calculate_tdc.clicked.connect(lambda: self.state.request("diagnostics.tdc_calculate"))
+        calculate_tdc.clicked.connect(
+            lambda: self.state.request(
+                "diagnostics.tdc_calculate",
+                clock_mhz=self.clock_mhz.value(),
+                sample_point=self.sample_point.value(),
+            )
+        )
         apply_tdc = QPushButton("显式写入并读回")
         apply_tdc.clicked.connect(self._apply_tdc)
         tdc.body.addWidget(calculate_tdc)
@@ -297,4 +304,35 @@ class DiagnosticsPage(WorkbenchPage):
             QMessageBox.question(self, "写入 TDC", "仅 Orin mttcan 支持该操作。确认按计算结果写入并读回？")
             == QMessageBox.StandardButton.Yes
         ):
-            self.state.request("diagnostics.tdc_apply")
+            self.state.request(
+                "diagnostics.tdc_apply",
+                clock_mhz=self.clock_mhz.value(),
+                sample_point=self.sample_point.value(),
+            )
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if not action.startswith("diagnostics."):
+            return
+        if event == "progress" and isinstance(payload, dict):
+            self.diag_progress.setValue(int(payload.get("progress", 0)))
+            message = str(payload.get("message", ""))
+            if message:
+                self.diag_console.appendPlainText(message)
+        elif event == "failed":
+            error = payload.get("error", "未知错误") if isinstance(payload, dict) else "未知错误"
+            self.diag_console.appendPlainText(f"[失败] {action}: {error}")
+        elif event == "cancelled":
+            self.diag_console.appendPlainText(f"[停止] {action} 已取消，远程进程组已清理")
+        elif event == "succeeded":
+            if action == "diagnostics.stress_start" and isinstance(payload, dict):
+                bundle = payload.get("bundle", {})
+                report_path = bundle.get("report_html", "") if isinstance(bundle, dict) else ""
+                self.diag_console.appendPlainText(f"[完成] 报告：{report_path}")
+                self.diag_progress.setValue(100)
+            elif action in {"diagnostics.timing_calculate", "diagnostics.tdc_calculate"}:
+                self.diag_console.appendPlainText(f"[计算结果] {payload}")
+            else:
+                self.diag_console.appendPlainText(f"[完成] {action}")
+        if action == "diagnostics.stress_start" and event in {"succeeded", "failed", "cancelled"}:
+            self.diag_start.setEnabled(True)
+            self.diag_stop.setEnabled(False)

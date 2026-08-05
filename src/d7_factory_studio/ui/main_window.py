@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from d7_factory_studio.application import ApplicationState
+from d7_factory_studio.coordinator import ApplicationCoordinator
 from d7_factory_studio.core.models import LinkState
 from d7_factory_studio.settings_store import SettingsStore
 from d7_factory_studio.ui.pages.diagnostics import DiagnosticsPage
@@ -58,7 +59,7 @@ class MainWindow(QMainWindow):
         self.resize(1600, 940)
         self.setMinimumSize(QSize(1180, 720))
         self._build_ui()
-        self.state.action_requested.connect(self._route_action)
+        self.coordinator = ApplicationCoordinator(self.state, self.settings, self)
         self.state.log("系统", "D7 Factory Studio 已启动")
 
     def _build_ui(self) -> None:
@@ -187,8 +188,6 @@ class MainWindow(QMainWindow):
     def _toggle_connection(self) -> None:
         if self.state.link_state is LinkState.CONNECTED:
             self.state.request("connection.disconnect")
-            self.state.set_link_state(LinkState.DISCONNECTED)
-            self.state.log("连接", "设备连接已断开")
             return
         if self.state.link_state is LinkState.CONNECTING:
             return
@@ -200,18 +199,7 @@ class MainWindow(QMainWindow):
             interface=self.state.active_interface,
         )
 
-    def _route_action(self, action: str, payload: object) -> None:
-        # Feature services register here during integration. Until then, fail closed:
-        # never report a hardware action as successful without a real transport.
-        if action == "connection.connect":
-            self.state.set_link_state(LinkState.DISCONNECTED)
-            self.state.log("连接", "未检测到可用硬件连接服务，请检查设置和驱动", "error")
-            return
-        if action == "connection.disconnect":
-            return
-        self.state.log("任务", f"已提交 {action}；等待对应硬件服务处理")
-
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        self.state.request("application.shutdown")
         self.state.lock("应用退出，已请求所有运动目标停止并失能")
+        self.coordinator.shutdown()
         super().closeEvent(event)

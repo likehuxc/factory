@@ -32,7 +32,7 @@ class FirmwareTargetPanel(QWidget):
         settings = Card("升级设置")
         form = FormSection()
         self.target_id = QLineEdit("0x18" if target == "pmu" else "0x42")
-        self.target_id.setPlaceholderText("11 位 CAN ID，例如 0x42")
+        self.target_id.setPlaceholderText("IAP 协议目标字节，例如 0x42")
         self.iap_id = QLineEdit("0x7FF")
         file_row = QWidget()
         file_layout = QHBoxLayout(file_row)
@@ -45,7 +45,7 @@ class FirmwareTargetPanel(QWidget):
         browse.clicked.connect(self._browse)
         file_layout.addWidget(self.file_path, 1)
         file_layout.addWidget(browse)
-        form.add_field("目标 CAN ID", self.target_id)
+        form.add_field("目标设备 ID", self.target_id)
         form.add_field("IAP CAN ID", self.iap_id)
         form.add_field("固件文件", file_row)
         settings.body.addWidget(form)
@@ -92,6 +92,7 @@ class FirmwareTargetPanel(QWidget):
         logs.body.addWidget(self.console)
         layout.addWidget(logs)
         layout.addStretch(1)
+        state.task_event.connect(self._on_task_event)
 
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -107,9 +108,15 @@ class FirmwareTargetPanel(QWidget):
             raise ValueError("CAN ID 必须在 0x000–0x7FF")
         return value
 
+    def _validate_target_id(self, text: str) -> int:
+        value = int(text.strip(), 0)
+        if not 0 <= value <= 0xFF:
+            raise ValueError("IAP 目标设备 ID 是协议内 1 字节，必须在 0x00–0xFF")
+        return value
+
     def _validate(self) -> bool:
         try:
-            target_id = self._validate_can_id(self.target_id.text())
+            target_id = self._validate_target_id(self.target_id.text())
             iap_id = self._validate_can_id(self.iap_id.text())
             path = Path(self.file_path.text())
             if not path.is_file():
@@ -136,7 +143,7 @@ class FirmwareTargetPanel(QWidget):
         payload = {
             "target": self.target,
             "firmware": self.file_path.text(),
-            "target_id": self._validate_can_id(self.target_id.text()),
+            "target_id": self._validate_target_id(self.target_id.text()),
             "iap_id": self._validate_can_id(self.iap_id.text()),
         }
         self.state.request("firmware.start", **payload)
@@ -148,7 +155,33 @@ class FirmwareTargetPanel(QWidget):
         self.state.request("firmware.cancel", target=self.target)
         self.state.log("升级", "已请求停止升级", "warning")
         self.stop.setEnabled(False)
-        self.start.setEnabled(True)
+
+    def _on_task_event(self, action: str, event: str, payload: object) -> None:
+        if action != f"firmware.start.{self.target}":
+            return
+        if event == "progress" and isinstance(payload, dict):
+            self.progress.setValue(int(payload.get("progress", 0)))
+            message = str(payload.get("message", ""))
+            if message:
+                self.message.set_text(message)
+                self.console.appendPlainText(message)
+        elif event == "succeeded":
+            self.progress.setValue(100)
+            self.message.set_text("升级完成，结果已写入任务记录。")
+            self.console.appendPlainText("[完成] 固件升级成功")
+            self.start.setEnabled(True)
+            self.stop.setEnabled(False)
+        elif event == "failed":
+            error = payload.get("error", "未知错误") if isinstance(payload, dict) else "未知错误"
+            self.message.set_text(f"升级失败：{error}")
+            self.console.appendPlainText(f"[失败] {error}")
+            self.start.setEnabled(True)
+            self.stop.setEnabled(False)
+        elif event == "cancelled":
+            self.message.set_text("升级已停止。")
+            self.console.appendPlainText("[停止] 用户取消升级")
+            self.start.setEnabled(True)
+            self.stop.setEnabled(False)
 
 
 class FirmwarePage(WorkbenchPage):

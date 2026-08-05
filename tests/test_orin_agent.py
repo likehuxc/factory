@@ -4,8 +4,13 @@ import json
 
 import pytest
 
+from d7_factory_studio.core.models import CanFrame, CanMode
 from d7_factory_studio.features.motor.orin_service import OrinMotorService
-from d7_factory_studio.transports.orin_agent import AgentProtocolError, JsonlDecoder
+from d7_factory_studio.transports.orin_agent import (
+    AgentCanTransport,
+    AgentProtocolError,
+    JsonlDecoder,
+)
 
 
 class FakeAgent:
@@ -17,6 +22,21 @@ class FakeAgent:
         if operation == "zero.prepare":
             return {"token": "zero:r1:1"}
         return {}
+
+
+class FakeEventAgent(FakeAgent):
+    is_running = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listeners = []
+
+    def add_event_listener(self, listener):
+        self.listeners.append(listener)
+
+    def remove_event_listener(self, listener):
+        if listener in self.listeners:
+            self.listeners.remove(listener)
 
 
 def test_jsonl_decoder_accepts_split_messages() -> None:
@@ -66,3 +86,25 @@ def test_emergency_stop_orders_zero_before_disable() -> None:
     service.emergency_stop({"motors": [1, 2]})
     assert [call[0] for call in client.calls] == ["motor.set_velocity", "motor.disable"]
     assert client.calls[0][2]["rad_s"] == 0.0
+
+
+def test_agent_can_transport_filters_bus_and_round_trips_frame() -> None:
+    client = FakeEventAgent()
+    transport = AgentCanTransport(client, "can5")
+    transport.open(0, CanMode.CLASSIC)
+    assert client.calls[-1][0] == "can.subscribe"
+    client.listeners[0]({"v": 1, "type": "can.frame", "bus": "can2", "id": 1, "is_fd": False, "data": [1]})
+    client.listeners[0](
+        {"v": 1, "type": "can.frame", "bus": "can5", "id": 0x18, "is_fd": False, "data": [1, 2]}
+    )
+    assert transport.receive(0) == [
+        CanFrame(0x18, b"\x01\x02", is_fd=False, bitrate_switch=False, timestamp=0)
+    ]
+    transport.send(CanFrame(0x18, b"\x03", is_fd=False))
+    assert client.calls[-1] == (
+        "can.send",
+        None,
+        {"unsafe": True, "bus": "can5", "id": 0x18, "is_fd": False, "data": [3]},
+    )
+    transport.close()
+    assert client.listeners == []

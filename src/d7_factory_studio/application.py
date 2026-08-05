@@ -13,6 +13,7 @@ class ApplicationState(QObject):
     changed = Signal()
     activity_added = Signal(str, str, str)
     action_requested = Signal(str, object)
+    task_event = Signal(str, str, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -30,6 +31,7 @@ class ApplicationState(QObject):
     def set_connection_mode(self, mode: ConnectionMode) -> None:
         if mode == self.connection_mode:
             return
+        should_disconnect = self.link_state is not LinkState.DISCONNECTED
         self.connection_mode = mode
         self.link_state = LinkState.DISCONNECTED
         self.safety_locked = True
@@ -39,11 +41,14 @@ class ApplicationState(QObject):
             "连接", f"已切换到{'PC 直连' if mode is ConnectionMode.PC_DIRECT else 'Orin 远程'}，安全锁已恢复"
         )
         self.changed.emit()
+        if should_disconnect:
+            self.request("connection.disconnect")
 
     def set_evt(self, variant: str) -> None:
         config = load_builtin_evt(variant)
         if config.variant == self.evt.variant:
             return
+        should_disconnect = self.link_state is not LinkState.DISCONNECTED
         self.evt = config
         self.active_interface = self._default_interface()
         self.link_state = LinkState.DISCONNECTED
@@ -52,16 +57,23 @@ class ApplicationState(QObject):
         self.fault_message = ""
         self.log("配置", f"已切换到 {config.variant}，连接已断开并恢复安全锁")
         self.changed.emit()
+        if should_disconnect:
+            self.request("connection.disconnect")
 
     def set_interface(self, interface: str) -> None:
         if interface not in self.evt.interfaces:
             raise ValueError(f"当前 {self.evt.variant} 不包含接口 {interface}")
         if interface == self.active_interface:
             return
+        should_disconnect = self.link_state is not LinkState.DISCONNECTED
         self.active_interface = interface
+        self.link_state = LinkState.DISCONNECTED
+        self.online_nodes = 0
         self.safety_locked = True
-        self.log("连接", f"当前接口切换为 {interface.upper()}，安全锁已恢复")
+        self.log("连接", f"当前接口切换为 {interface.upper()}，连接已断开并恢复安全锁")
         self.changed.emit()
+        if should_disconnect:
+            self.request("connection.disconnect")
 
     def set_link_state(self, state: LinkState, fault: str = "") -> None:
         self.link_state = state
@@ -92,6 +104,9 @@ class ApplicationState(QObject):
 
     def request(self, action: str, **payload: Any) -> None:
         self.action_requested.emit(action, payload)
+
+    def notify_task(self, action: str, event: str, payload: object = None) -> None:
+        self.task_event.emit(action, event, payload)
 
     def log(self, source: str, message: str, level: str = "info") -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")

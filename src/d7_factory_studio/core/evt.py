@@ -192,4 +192,3 @@ def builtin_evt_path(variant: str = "EVT2") -> Path:
 
 def load_builtin_evt(variant: str = "EVT2") -> EvtConfig:
     return load_evt_config(builtin_evt_path(variant))
-

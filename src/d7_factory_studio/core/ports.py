@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 
@@ -102,4 +102,3 @@ class RemoteSession(ABC):
         destination: Path,
         token: CancellationToken,
     ) -> list[dict[str, object]]: ...
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 
 class ConnectionMode(StrEnum):
@@ -64,11 +64,8 @@ class TaskProgress:
             raise ValueError("progress 必须在 0..100")
 
 
-T = TypeVar("T")
-
-
 @dataclass(frozen=True, slots=True)
-class OperationResult(Generic[T]):
+class OperationResult[T]:
     ok: bool
     value: T | None = None
     error: str | None = None
@@ -81,4 +78,3 @@ class OperationResult(Generic[T]):
     @classmethod
     def failure(cls, error: str, **details: Any) -> OperationResult[T]:
         return cls(ok=False, error=error, details=details)
-

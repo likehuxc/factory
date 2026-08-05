@@ -15,4 +15,3 @@ def test_standard_id_and_length_validation() -> None:
         CanFrame(0x800)
     with pytest.raises(ValueError):
         CanFrame(0x12, bytes(9), is_fd=False)
-

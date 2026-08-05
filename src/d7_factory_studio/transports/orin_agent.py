@@ -203,6 +203,37 @@ class OrinAgentClient:
             raise AgentProtocolError(f"agent 上传后 SHA-256 校验失败: {stderr.strip()}")
         return local_hash.hexdigest()
 
+    def deploy_bytes(self, content: bytes, remote_path: str, mode: int = 0o600) -> str:
+        transport = self._require_transport()
+        remote = PurePosixPath(remote_path)
+        if not remote.is_absolute() or ".." in remote.parts:
+            raise ValueError("agent 远端路径必须是无上级跳转的绝对路径")
+        status, _stdout, stderr = self.execute(
+            f"mkdir -p -- {shlex.quote(str(remote.parent))}"
+        )
+        if status != 0:
+            raise AgentProtocolError(f"创建 agent 目录失败: {stderr.strip()}")
+        temporary = str(remote) + ".part"
+        expected_hash = hashlib.sha256(content).hexdigest()
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        try:
+            with sftp.open(temporary, "wb") as target:
+                target.write(content)
+            sftp.chmod(temporary, mode)
+            try:
+                sftp.posix_rename(temporary, str(remote))
+            except OSError:
+                with contextlib.suppress(OSError):
+                    sftp.remove(str(remote))
+                sftp.rename(temporary, str(remote))
+        finally:
+            sftp.close()
+        status, stdout, stderr = self.execute(f"sha256sum -- {shlex.quote(str(remote))}")
+        remote_hash = stdout.strip().split(maxsplit=1)[0] if status == 0 else ""
+        if remote_hash.lower() != expected_hash.lower():
+            raise AgentProtocolError(f"agent 上传后 SHA-256 校验失败: {stderr.strip()}")
+        return expected_hash
+
     def start(
         self,
         remote_binary: str,

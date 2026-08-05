@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from d7_factory_studio.core.evt import EvtConfigError, load_builtin_evt, load_evt_config
+from d7_factory_studio.core.evt import (
+    EvtConfigError,
+    agent_config_yaml,
+    load_builtin_evt,
+    load_evt_config,
+)
 from d7_factory_studio.core.models import CanMode
 
 
@@ -25,6 +30,15 @@ def test_evt2_is_default_layout() -> None:
     assert config.nodes_for_bus("can1")[0].logic_id == 15
     assert config.nodes_for_bus("can2")[0].logic_id == 23
     assert config.interfaces["can5"].role == "ota"
+
+
+def test_agent_config_is_generated_from_evt_without_mandatory_limits() -> None:
+    document = agent_config_yaml(load_builtin_evt("EVT2"))
+    assert "robot_model: D7" in document
+    assert "device_id: 17" in document
+    assert "bus: can4" in document
+    assert "position_min_rad" not in document
+    assert document.count("logic_id:") == 30
 
 
 def test_rejects_non_d7_config(tmp_path: Path) -> None:

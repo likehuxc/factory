@@ -192,3 +192,30 @@ def builtin_evt_path(variant: str = "EVT2") -> Path:
 
 def load_builtin_evt(variant: str = "EVT2") -> EvtConfig:
     return load_evt_config(builtin_evt_path(variant))
+
+
+def agent_config_yaml(config: EvtConfig) -> str:
+    """Build the Orin agent inventory from the active EVT configuration."""
+    motors: list[dict[str, object]] = []
+    for node in config.nodes:
+        motor: dict[str, object] = {
+            "logic_id": node.logic_id,
+            "device_id": node.dev_id,
+            "name": node.name,
+            "bus": node.bus,
+            "group": node.group,
+        }
+        if node.position_min_rad is not None and node.position_max_rad is not None:
+            motor.update(
+                position_min_rad=node.position_min_rad,
+                position_max_rad=node.position_max_rad,
+                limits_verified=True,
+            )
+        motors.append(motor)
+    document = {
+        "schema_version": 1,
+        "robot_model": "D7",
+        "agent": {"deadman_timeout_ms": 1000, "state_period_ms": 100},
+        "motors": motors,
+    }
+    return yaml.safe_dump(document, allow_unicode=True, sort_keys=False)

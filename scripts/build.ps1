@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Python = "py -3.12",
+    [string]$Python = "py -3.14",
     [switch]$SkipTests
 )
 
@@ -17,10 +17,10 @@ if ($pythonParts.Count -gt 1) {
 
 $probe = @'
 import struct, sys
-if sys.version_info[:2] != (3, 12):
-    raise SystemExit(f"Python 3.12 required, found {sys.version.split()[0]}")
-if struct.calcsize("P") * 8 != 64:
-    raise SystemExit("64-bit Python required")
+if not ((3, 12) <= sys.version_info[:2] < (3, 15)):
+    raise SystemExit(f'Python 3.12-3.14 required, found {sys.version.split()[0]}')
+if struct.calcsize('P') * 8 != 64:
+    raise SystemExit('64-bit Python required')
 print(sys.executable)
 '@
 & $pythonExe @pythonPrefix -c $probe
@@ -41,4 +41,3 @@ if (-not (Test-Path -LiteralPath $exePath)) {
 $hash = Get-FileHash -LiteralPath $exePath -Algorithm SHA256
 Write-Host "Built: $exePath"
 Write-Host "SHA-256: $($hash.Hash)"
-

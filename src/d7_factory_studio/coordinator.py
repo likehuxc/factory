@@ -11,6 +11,7 @@ from typing import Any
 from PySide6.QtCore import QObject, Signal, Slot
 
 from d7_factory_studio.application import ApplicationState
+from d7_factory_studio.core.evt import agent_config_yaml
 from d7_factory_studio.core.models import CanFrame, ConnectionMode, LinkState
 from d7_factory_studio.core.ports import (
     CancellationToken,
@@ -206,8 +207,9 @@ class ApplicationCoordinator(QObject):
                 warning = ""
                 motor_service: OrinMotorService | None = None
                 binary = self._agent_binary_path()
-                config_path = Path(str(self.settings.value("ssh/agent_config", ""))).expanduser()
-                if binary.is_file() and config_path.is_file():
+                configured_config = str(self.settings.value("ssh/agent_config", "")).strip()
+                config_path = Path(configured_config).expanduser() if configured_config else None
+                if binary.is_file():
                     status, home, error = client.execute('printf "%s" "$HOME"')
                     if status != 0 or not home.strip().startswith("/"):
                         raise RuntimeError(error.strip() or "无法确定 Orin 用户目录")
@@ -216,10 +218,15 @@ class ApplicationCoordinator(QObject):
                     remote_config = f"{remote_root}/config/d7-agent.yaml"
                     report(70, "正在部署会话级 motor agent")
                     client.deploy_file(binary, remote_binary, executable=True)
-                    client.deploy_file(config_path, remote_config)
-                    library_dir = Path(
-                        str(self.settings.value("ssh/agent_library_dir", ""))
-                    ).expanduser()
+                    if config_path is not None:
+                        if not config_path.is_file():
+                            raise FileNotFoundError(f"自定义 D7 agent YAML 不存在: {config_path}")
+                        client.deploy_file(config_path, remote_config)
+                    else:
+                        client.deploy_bytes(
+                            agent_config_yaml(self.state.evt).encode("utf-8"), remote_config
+                        )
+                    library_dir = self._agent_library_dir()
                     if library_dir.is_dir():
                         for library in sorted(library_dir.glob("*.so*")):
                             if library.is_file():
@@ -235,7 +242,7 @@ class ApplicationCoordinator(QObject):
                     motor_service = OrinMotorService(client)
                 else:
                     warning = (
-                        "未提供 ARM64 agent 或经验证的 D7 电机限位配置；"
+                        "未找到内置或自定义 ARM64 agent；"
                         "远程诊断可用，CAN 电机保持禁用"
                     )
                 token.raise_if_cancelled()
@@ -840,7 +847,7 @@ class ApplicationCoordinator(QObject):
 
     def _require_agent(self) -> OrinAgentClient:
         if self._resources.agent_client is None or not self._resources.agent_client.is_running:
-            raise RuntimeError("Orin motor agent 未部署或未运行；请提供 ARM64 agent 与经验证的 D7 限位配置")
+            raise RuntimeError("Orin motor agent 未部署或未运行；请检查内置资源或自定义 Agent 路径")
         return self._resources.agent_client
 
     def _require_motor_service(self) -> OrinMotorService:
@@ -858,6 +865,13 @@ class ApplicationCoordinator(QObject):
         if packaged.is_file():
             return packaged
         return Path(__file__).resolve().parents[2] / "artifacts" / "agent" / "aarch64" / "d7-factory-agent"
+
+    def _agent_library_dir(self) -> Path:
+        configured = str(self.settings.value("ssh/agent_library_dir", "")).strip()
+        if configured:
+            return Path(configured).expanduser()
+        binary = self._agent_binary_path()
+        return binary.parent / "lib"
 
     def _test_ssh(self, payload: dict[str, Any]) -> dict[str, str]:
         host = str(payload["host"]).strip()

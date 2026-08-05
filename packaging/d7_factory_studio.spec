@@ -4,7 +4,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 
-project_root = Path(SPECPATH).resolve().parent.parent
+project_root = Path(SPECPATH).resolve().parent
 package_root = project_root / "src" / "d7_factory_studio"
 datas = [
     (str(package_root / "config" / "evt1.yaml"), "d7_factory_studio/config"),
@@ -15,6 +15,9 @@ datas = [
 agent_binary = project_root / "artifacts" / "agent" / "aarch64" / "d7-factory-agent"
 if agent_binary.is_file():
     datas.append((str(agent_binary), "d7_factory_studio/agent/aarch64"))
+    for agent_library in sorted((agent_binary.parent / "lib").glob("*.so*")):
+        if agent_library.is_file():
+            datas.append((str(agent_library), "d7_factory_studio/agent/aarch64/lib"))
 
 hiddenimports = collect_submodules("keyring.backends")
 

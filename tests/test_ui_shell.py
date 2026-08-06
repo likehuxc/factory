@@ -10,7 +10,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from d7_factory_studio.app import create_application
-from d7_factory_studio.ui.controls import D7SpinBox
+from d7_factory_studio.ui.controls import D7SpinBox, D7TableWidget
 from d7_factory_studio.ui.main_window import MainWindow
 
 
@@ -45,6 +45,29 @@ def test_diagnostic_interfaces_use_multi_select_choice_buttons() -> None:
     first_interface = str(buttons[0].property("interface"))
     buttons[0].click()
     assert first_interface not in page._selected_interfaces()
+    window.close()
+    app.processEvents()
+
+
+def test_top_rail_hides_global_can_and_nodes_select_their_own_interface() -> None:
+    app = create_application([])
+    window = MainWindow()
+    assert not hasattr(window.status_rail, "interface_combo")
+
+    page = window.pages.widget(window.page_indexes["diagnostics"])
+    page.node_interface.setCurrentIndex(1)
+    interface = str(page.node_interface.currentData())
+    assert page.node_table.rowCount() == len(window.state.evt.nodes_for_bus(interface))
+    captured: list[tuple[str, object]] = []
+    window.state.action_requested.connect(lambda action, payload: captured.append((action, payload)))
+    page._run_broadcast()
+    assert captured[-1] == ("diagnostics.broadcast", {"interface": interface})
+
+    tables = window.findChildren(D7TableWidget)
+    assert len(tables) >= 9
+    assert all(table.verticalHeader().defaultSectionSize() == 38 for table in tables)
+    machine = window.pages.widget(window.page_indexes["machine"])
+    assert machine.can_interface.count() == len(window.state.evt.interfaces)
     window.close()
     app.processEvents()
 

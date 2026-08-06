@@ -28,6 +28,8 @@ def stylesheet() -> str:
     resources = Path(__file__).resolve().parent.parent / "resources"
     plus_icon = (resources / "spin-plus.svg").as_posix()
     minus_icon = (resources / "spin-minus.svg").as_posix()
+    chevron_icon = (resources / "chevron-down.svg").as_posix()
+    check_icon = (resources / "check.svg").as_posix()
     return f"""
     * {{
         font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
@@ -73,8 +75,23 @@ def stylesheet() -> str:
         border-radius: 9px; background: {c["surface"]}; selection-background-color: {c["primary"]};
     }}
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {c["primary"]}; }}
-    QComboBox::drop-down {{ border: none; width: 32px; }}
-    QComboBox QAbstractItemView {{ padding: 5px; border: 1px solid {c["line"]}; border-radius: 8px; }}
+    QComboBox::drop-down {{ border: none; border-left: 1px solid #E6ECF3; width: 38px; }}
+    QComboBox::down-arrow {{ image: url("{chevron_icon}"); width: 15px; height: 15px; }}
+    QComboBox QAbstractItemView {{
+        padding: 5px; outline: none; border: 1px solid #C9D5E4; border-radius: 8px;
+        background: {c["surface"]}; selection-background-color: {c["primary"]};
+        selection-color: white;
+    }}
+    QComboBox QAbstractItemView::item {{ min-height: 38px; padding: 0 10px; }}
+    QCheckBox {{ spacing: 8px; }}
+    QCheckBox::indicator {{
+        width: 18px; height: 18px; border-radius: 4px;
+        border: 1px solid #B7C4D4; background: white;
+    }}
+    QCheckBox::indicator:hover {{ border-color: #7FA4F8; background: #F7FAFF; }}
+    QCheckBox::indicator:checked {{
+        image: url("{check_icon}"); border: 1px solid {c["primary"]}; background: {c["primary"]};
+    }}
     QSpinBox, QDoubleSpinBox, QDateTimeEdit {{ padding-right: 38px; }}
     QSpinBox::up-button, QDoubleSpinBox::up-button, QDateTimeEdit::up-button {{
         subcontrol-origin: border; subcontrol-position: top right;
@@ -98,14 +115,23 @@ def stylesheet() -> str:
         image: url("{minus_icon}"); width: 12px; height: 12px;
     }}
     QTableView, QTableWidget {{
-        background: {c["surface"]}; alternate-background-color: #F8FAFD;
-        border: 1px solid {c["line"]}; border-radius: 8px; gridline-color: #E9EEF5;
+        background: {c["surface"]}; alternate-background-color: {c["surface"]};
+        border: 1px solid #D5DFEB; border-radius: 8px; gridline-color: transparent;
         selection-background-color: {c["primary_soft"]}; selection-color: {c["ink"]};
+        outline: none;
+    }}
+    QTableView::item, QTableWidget::item {{
+        padding: 5px 10px; border: none; border-bottom: 1px solid #E7EDF4;
+    }}
+    QTableView::item:hover, QTableWidget::item:hover {{ background: #F7FAFE; }}
+    QTableView::item:selected, QTableWidget::item:selected {{
+        color: {c["ink"]}; background: {c["primary_soft"]}; border-bottom: 1px solid #D5E2FF;
     }}
     QHeaderView::section {{
-        background: #F4F7FA; color: {c["muted"]}; border: none; border-bottom: 1px solid {c["line"]};
-        padding: 9px; font-weight: 700;
+        background: #F3F6FA; color: #52637A; border: none; border-bottom: 1px solid #D5DFEB;
+        padding: 10px 8px; font-weight: 700;
     }}
+    QTableCornerButton::section {{ background: #F3F6FA; border: none; border-bottom: 1px solid #D5DFEB; }}
     QTabWidget::pane {{ border: none; }}
     QTabBar::tab {{ padding: 9px 14px; color: {c["muted"]}; border-bottom: 2px solid transparent; }}
     QTabBar::tab:selected {{ color: {c["primary"]}; border-bottom-color: {c["primary"]}; font-weight: 700; }}

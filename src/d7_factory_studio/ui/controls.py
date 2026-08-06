@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFocusEvent, QMouseEvent, QPalette, QWheelEvent
-from PySide6.QtWidgets import QAbstractSpinBox, QComboBox, QDateTimeEdit, QDoubleSpinBox, QSpinBox
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QAbstractSpinBox,
+    QComboBox,
+    QDateTimeEdit,
+    QDoubleSpinBox,
+    QSpinBox,
+    QTableWidget,
+)
 
 
 class _WheelAfterFocusMixin:
@@ -58,3 +66,22 @@ class D7DateTimeEdit(_D7SpinMixin, QDateTimeEdit):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._configure_spinbox()
+
+
+class D7TableWidget(QTableWidget):
+    """Consistent dense read-only table; editable pages can opt back into edit triggers."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setAlternatingRowColors(False)
+        self.setShowGrid(False)
+        self.setWordWrap(False)
+        self.setCornerButtonEnabled(False)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(38)
+        self.horizontalHeader().setMinimumHeight(44)
+        self.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.horizontalHeader().setHighlightSections(False)

@@ -197,7 +197,6 @@ class MainWindow(QMainWindow):
             "connection.connect",
             mode=self.state.connection_mode.value,
             evt=self.state.evt.variant,
-            interface=self.state.active_interface,
         )
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]

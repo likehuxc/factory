@@ -215,10 +215,6 @@ class StatusRail(QWidget):
         self.evt_combo.currentTextChanged.connect(self._evt_changed)
         layout.addWidget(self.evt_combo)
 
-        self.interface_combo = QComboBox()
-        self.interface_combo.currentTextChanged.connect(self._interface_changed)
-        layout.addWidget(self.interface_combo)
-
         self.link_pill = StatusPill()
         self.lock_pill = StatusPill()
         self.nodes_pill = StatusPill()
@@ -245,10 +241,6 @@ class StatusRail(QWidget):
         if value:
             self.state.set_evt(value)
 
-    def _interface_changed(self, value: str) -> None:
-        if value and value in self.state.evt.interfaces:
-            self.state.set_interface(value)
-
     def _toggle_lock(self) -> None:
         if self.state.safety_locked:
             try:
@@ -264,15 +256,6 @@ class StatusRail(QWidget):
             self.evt_combo.blockSignals(True)
             self.evt_combo.setCurrentText(self.state.evt.variant)
             self.evt_combo.blockSignals(False)
-        current_interfaces = list(self.state.evt.interfaces)
-        listed = [self.interface_combo.itemText(index) for index in range(self.interface_combo.count())]
-        if listed != current_interfaces:
-            self.interface_combo.blockSignals(True)
-            self.interface_combo.clear()
-            self.interface_combo.addItems(current_interfaces)
-            self.interface_combo.setCurrentText(self.state.active_interface)
-            self.interface_combo.blockSignals(False)
-
         link_map = {
             LinkState.DISCONNECTED: ("● 未连接", "neutral"),
             LinkState.CONNECTING: ("● 连接中", "primary"),

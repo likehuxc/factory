@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
-    QTableWidget,
     QTableWidgetItem,
     QWidget,
 )
@@ -31,6 +30,7 @@ from d7_factory_studio.ui.controls import (
 from d7_factory_studio.ui.controls import (
     D7SpinBox as QSpinBox,
 )
+from d7_factory_studio.ui.controls import D7TableWidget as QTableWidget
 from d7_factory_studio.ui.pages.base import FormSection, InlineMessage, LogConsole, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, Metric, PageHeader
 
@@ -85,7 +85,6 @@ class NodeOverviewPage(WorkbenchPage):
         )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
-        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table_card.body.addWidget(self.table)
         self.layout.addWidget(table_card)
@@ -580,6 +579,12 @@ class ParameterPage(WorkbenchPage):
         target_row.addWidget(read)
         target_card.body.addLayout(target_row)
         self.table = QTableWidget(5, 5)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
         self.table.setHorizontalHeaderLabels(["参数", "当前值", "新值", "单位", "状态"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)

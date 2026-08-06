@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QTableWidget,
     QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
@@ -33,6 +32,7 @@ from d7_factory_studio.ui.controls import (
 from d7_factory_studio.ui.controls import (
     D7SpinBox as QSpinBox,
 )
+from d7_factory_studio.ui.controls import D7TableWidget as QTableWidget
 from d7_factory_studio.ui.pages.base import FormSection, LogConsole, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, PageHeader
 
@@ -75,6 +75,7 @@ class MachinePage(WorkbenchPage):
         tabs.addTab(self._console_tab(), "CAN 控制台")
         self.layout.addWidget(tabs)
         state.task_event.connect(self._on_task_event)
+        state.changed.connect(self._refresh_can_interfaces)
 
     def _overview_tab(self) -> QWidget:
         tab = QWidget()
@@ -220,6 +221,8 @@ class MachinePage(WorkbenchPage):
         layout.setContentsMargins(0, 12, 0, 0)
         card = Card("原始 CAN 发送")
         form = FormSection()
+        self.can_interface = QComboBox()
+        self._refresh_can_interfaces()
         self.can_id = QLineEdit("0x000")
         self.can_data = QLineEdit()
         self.can_data.setPlaceholderText("十六进制字节，例如 01 02 A0 FF")
@@ -227,6 +230,7 @@ class MachinePage(WorkbenchPage):
         self.frame_type.addItem("CAN FD + BRS", "fd_brs")
         self.frame_type.addItem("CAN FD", "fd")
         self.frame_type.addItem("Classic CAN", "classic")
+        form.add_field("CAN 通道", self.can_interface)
         form.add_field("CAN ID", self.can_id)
         form.add_field("数据", self.can_data)
         form.add_field("帧类型", self.frame_type)
@@ -309,13 +313,34 @@ class MachinePage(WorkbenchPage):
             if event == "started":
                 self.monitor_start.setEnabled(False)
                 self.monitor_stop.setEnabled(True)
+                self.can_interface.setEnabled(False)
             elif event in {"succeeded", "failed", "cancelled"}:
                 self.monitor_start.setEnabled(True)
                 self.monitor_stop.setEnabled(False)
+                self.can_interface.setEnabled(True)
+
+    def _refresh_can_interfaces(self) -> None:
+        if not hasattr(self, "can_interface"):
+            return
+        current = self.can_interface.currentData()
+        expected = list(self.state.evt.interfaces)
+        listed = [self.can_interface.itemData(index) for index in range(self.can_interface.count())]
+        if listed == expected:
+            return
+        self.can_interface.blockSignals(True)
+        self.can_interface.clear()
+        for name, interface in self.state.evt.interfaces.items():
+            mode = "CAN FD" if interface.mode.value == "fd" else "Classic CAN"
+            self.can_interface.addItem(f"{name.upper()} · {mode}", name)
+        index = self.can_interface.findData(current)
+        self.can_interface.setCurrentIndex(index if index >= 0 else 0)
+        self.can_interface.blockSignals(False)
 
     def _start_can_monitor(self) -> None:
         if self._ready():
-            self.state.request("machine.can_monitor_start")
+            self.state.request(
+                "machine.can_monitor_start", interface=str(self.can_interface.currentData())
+            )
 
     def _record_can_frame(self, direction: str, frame: CanFrame) -> None:
         self.can_records.append((datetime.now().isoformat(timespec="milliseconds"), direction, frame))
@@ -405,5 +430,9 @@ class MachinePage(WorkbenchPage):
             == QMessageBox.StandardButton.Yes
         ):
             self.state.request(
-                "machine.can_send", arbitration_id=can_id, data=data, frame_type=self.frame_type.currentData()
+                "machine.can_send",
+                interface=str(self.can_interface.currentData()),
+                arbitration_id=can_id,
+                data=data,
+                frame_type=self.frame_type.currentData(),
             )

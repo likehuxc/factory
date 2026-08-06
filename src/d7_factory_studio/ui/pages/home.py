@@ -7,13 +7,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QPushButton,
-    QTableWidget,
     QTableWidgetItem,
 )
 
 from d7_factory_studio.application import ApplicationState
 from d7_factory_studio.core.evt import interface_role_label
 from d7_factory_studio.core.models import LinkState
+from d7_factory_studio.ui.controls import D7TableWidget as QTableWidget
 from d7_factory_studio.ui.pages.base import WorkbenchPage
 from d7_factory_studio.ui.theme import COLORS
 from d7_factory_studio.ui.widgets import Card, Metric, PageHeader
@@ -83,7 +83,6 @@ class HomePage(WorkbenchPage):
         )
         self.activity_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.activity_table.verticalHeader().setVisible(False)
-        self.activity_table.setAlternatingRowColors(True)
         self.activity_table.setMinimumHeight(190)
         activity_card.body.addWidget(self.activity_table)
         self.layout.addWidget(activity_card)

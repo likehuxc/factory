@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QTableWidget,
     QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
@@ -27,6 +26,7 @@ from d7_factory_studio.ui.controls import (
 from d7_factory_studio.ui.controls import (
     D7SpinBox as QSpinBox,
 )
+from d7_factory_studio.ui.controls import D7TableWidget as QTableWidget
 from d7_factory_studio.ui.pages.base import FormSection, InlineMessage, LogConsole, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, PageHeader, clear_layout
 
@@ -35,6 +35,7 @@ class DiagnosticsPage(WorkbenchPage):
     def __init__(self, state: ApplicationState) -> None:
         super().__init__()
         self.state = state
+        self._topology_signature: tuple[object, ...] | None = None
         self.layout.addWidget(
             PageHeader("链路诊断", "从网络路径到 SocketCAN、压测、节点与位时序，保留每一步原始证据。")
         )
@@ -148,28 +149,48 @@ class DiagnosticsPage(WorkbenchPage):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 12, 0, 0)
-        card = Card("节点参数与广播")
+        card = Card("节点参数与广播", "先选择 CAN 通道，再对该通道内的节点读取参数或监听广播应答。")
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("测试 CAN"))
+        self.node_interface = QComboBox()
+        self.node_interface.setMinimumWidth(220)
+        self.node_interface.currentIndexChanged.connect(self._rebuild_node_table)
+        toolbar.addWidget(self.node_interface)
+        self.node_count = QLabel("0 个节点")
+        self.node_count.setObjectName("Muted")
+        toolbar.addWidget(self.node_count)
+        toolbar.addStretch(1)
+        select_all = QPushButton("全选")
+        select_all.clicked.connect(lambda: self._set_all_nodes(True))
+        clear_all = QPushButton("清空")
+        clear_all.clicked.connect(lambda: self._set_all_nodes(False))
+        toolbar.addWidget(select_all)
+        toolbar.addWidget(clear_all)
+        card.body.addLayout(toolbar)
         self.node_table = QTableWidget(0, 6)
         self.node_table.setHorizontalHeaderLabels(["选择", "逻辑 ID", "节点", "设备 ID", "总线", "结果"])
-        self.node_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.node_table.verticalHeader().setVisible(False)
+        header = self.node_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.node_table.setColumnWidth(0, 76)
+        self.node_table.setMinimumHeight(410)
         card.body.addWidget(self.node_table)
         actions = QHBoxLayout()
         read = QPushButton("读取所选参数")
-        read.clicked.connect(
-            lambda: self.state.request("diagnostics.node_param_read", logic_ids=self._selected_nodes())
-        )
+        read.clicked.connect(self._read_nodes)
         write = QPushButton("写入并回读")
         write.clicked.connect(self._write_nodes)
-        broadcast = QPushButton("监听广播应答")
-        broadcast.setProperty("primary", True)
-        broadcast.clicked.connect(
-            lambda: self.state.request("diagnostics.broadcast", logic_ids=self._selected_nodes())
-        )
+        self.broadcast = QPushButton("监听广播应答")
+        self.broadcast.setProperty("primary", True)
+        self.broadcast.clicked.connect(self._run_broadcast)
         actions.addWidget(read)
         actions.addWidget(write)
         actions.addStretch(1)
-        actions.addWidget(broadcast)
+        actions.addWidget(self.broadcast)
         card.body.addLayout(actions)
         layout.addWidget(card)
         return tab
@@ -202,6 +223,10 @@ class DiagnosticsPage(WorkbenchPage):
         calculator.body.addWidget(calculate)
         layout.addWidget(calculator)
         tdc = Card("TDC / TDCR", "计算只给出建议，不会隐式写入 Orin 控制器。")
+        tdc_form = FormSection()
+        self.tdc_interface = QComboBox()
+        tdc_form.add_field("写入 CAN", self.tdc_interface)
+        tdc.body.addWidget(tdc_form)
         calculate_tdc = QPushButton("计算 TDC 建议")
         calculate_tdc.clicked.connect(
             lambda: self.state.request(
@@ -219,6 +244,14 @@ class DiagnosticsPage(WorkbenchPage):
         return tab
 
     def _rebuild_interfaces(self) -> None:
+        signature = (
+            self.state.evt.variant,
+            tuple((name, item.mode.value) for name, item in self.state.evt.interfaces.items()),
+            tuple((node.logic_id, node.bus) for node in self.state.evt.nodes),
+        )
+        if signature == self._topology_signature:
+            return
+        self._topology_signature = signature
         clear_layout(self.interface_checks)
         for name, interface in self.state.evt.interfaces.items():
             button = QPushButton(f"{name.upper()} · {'FD' if interface.mode.value == 'fd' else 'Classic'}")
@@ -229,17 +262,55 @@ class DiagnosticsPage(WorkbenchPage):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             self.interface_checks.addWidget(button)
         self.interface_checks.addStretch(1)
-        if hasattr(self, "node_table"):
-            self.node_table.setRowCount(0)
-            for node in self.state.evt.nodes:
-                row = self.node_table.rowCount()
-                self.node_table.insertRow(row)
-                selected = QCheckBox()
-                self.node_table.setCellWidget(row, 0, selected)
-                for column, value in enumerate(
-                    (node.logic_id, node.label, f"0x{node.dev_id:02X}", node.bus.upper(), "未测试"), 1
-                ):
-                    self.node_table.setItem(row, column, QTableWidgetItem(str(value)))
+        self._fill_interface_combo(self.node_interface, nodes_only=True)
+        self._fill_interface_combo(self.tdc_interface, fd_only=True)
+        self._rebuild_node_table()
+
+    def _fill_interface_combo(
+        self, combo: QComboBox, *, nodes_only: bool = False, fd_only: bool = False
+    ) -> None:
+        previous = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        for name, interface in self.state.evt.interfaces.items():
+            node_count = len(self.state.evt.nodes_for_bus(name))
+            if nodes_only and not node_count:
+                continue
+            if fd_only and interface.mode.value != "fd":
+                continue
+            mode = "CAN FD" if interface.mode.value == "fd" else "Classic CAN"
+            combo.addItem(f"{name.upper()} · {mode} · {node_count} 节点", name)
+        index = combo.findData(previous)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _rebuild_node_table(self) -> None:
+        if not hasattr(self, "node_table"):
+            return
+        interface = self.node_interface.currentData()
+        nodes = self.state.evt.nodes_for_bus(str(interface)) if interface else ()
+        self.node_table.setRowCount(0)
+        for node in nodes:
+            row = self.node_table.rowCount()
+            self.node_table.insertRow(row)
+            selected = QCheckBox()
+            selected.setProperty("logic_id", node.logic_id)
+            self.node_table.setCellWidget(row, 0, selected)
+            for column, value in enumerate(
+                (node.logic_id, node.label, f"0x{node.dev_id:02X}", node.bus.upper(), "未测试"), 1
+            ):
+                item = QTableWidgetItem(str(value))
+                if column in {1, 3, 4}:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.node_table.setItem(row, column, item)
+        self.node_count.setText(f"{len(nodes)} 个节点")
+        self.broadcast.setText(f"监听 {str(interface).upper()} 广播应答" if interface else "监听广播应答")
+
+    def _set_all_nodes(self, checked: bool) -> None:
+        for row in range(self.node_table.rowCount()):
+            widget = self.node_table.cellWidget(row, 0)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(checked)
 
     def _selected_interfaces(self) -> list[str]:
         result = []
@@ -256,6 +327,22 @@ class DiagnosticsPage(WorkbenchPage):
             if isinstance(self.node_table.cellWidget(row, 0), QCheckBox)
             and self.node_table.cellWidget(row, 0).isChecked()
         ]
+
+    def _read_nodes(self) -> None:
+        nodes = self._selected_nodes()
+        if not nodes:
+            QMessageBox.warning(self, "未选择节点", "请先选择至少一个需要读取参数的节点。")
+            return
+        self.state.request("diagnostics.node_param_read", logic_ids=nodes)
+
+    def _run_broadcast(self) -> None:
+        interface = self.node_interface.currentData()
+        if not interface:
+            QMessageBox.warning(self, "未选择 CAN", "请选择需要监听广播应答的 CAN 通道。")
+            return
+        for row in range(self.node_table.rowCount()):
+            self.node_table.item(row, 5).setText("测试中…")
+        self.state.request("diagnostics.broadcast", interface=str(interface))
 
     def _start_stress(self) -> None:
         if self.state.link_state is not LinkState.CONNECTED:
@@ -303,9 +390,11 @@ class DiagnosticsPage(WorkbenchPage):
 
     def _write_nodes(self) -> None:
         nodes = self._selected_nodes()
+        if not nodes:
+            QMessageBox.warning(self, "未选择节点", "请先选择至少一个需要写入并回读的节点。")
+            return
         if (
-            nodes
-            and QMessageBox.question(self, "写入节点参数", f"确认写入并回读 {len(nodes)} 个节点？")
+            QMessageBox.question(self, "写入节点参数", f"确认写入并回读 {len(nodes)} 个节点？")
             == QMessageBox.StandardButton.Yes
         ):
             self.state.request("diagnostics.node_param_write", logic_ids=nodes)
@@ -317,6 +406,7 @@ class DiagnosticsPage(WorkbenchPage):
         ):
             self.state.request(
                 "diagnostics.tdc_apply",
+                interface=str(self.tdc_interface.currentData()),
                 clock_mhz=self.clock_mhz.value(),
                 sample_point=self.sample_point.value(),
             )
@@ -324,6 +414,11 @@ class DiagnosticsPage(WorkbenchPage):
     def _on_task_event(self, action: str, event: str, payload: object) -> None:
         if not action.startswith("diagnostics."):
             return
+        if action == "diagnostics.broadcast":
+            running = event == "started"
+            if event in {"started", "succeeded", "failed", "cancelled"}:
+                self.node_interface.setEnabled(not running)
+                self.broadcast.setEnabled(not running)
         if event == "progress" and isinstance(payload, dict):
             self.diag_progress.setValue(int(payload.get("progress", 0)))
             message = str(payload.get("message", ""))
@@ -342,6 +437,28 @@ class DiagnosticsPage(WorkbenchPage):
                 self.diag_progress.setValue(100)
             elif action in {"diagnostics.timing_calculate", "diagnostics.tdc_calculate"}:
                 self.diag_console.appendPlainText(f"[计算结果] {payload}")
+            elif action in {"diagnostics.node_param_read", "diagnostics.node_param_write"} and isinstance(
+                payload, dict
+            ):
+                verdicts = {
+                    int(item["logic_id"]): str(item.get("verdict", "完成"))
+                    for item in payload.get("nodes", [])
+                    if isinstance(item, dict) and "logic_id" in item
+                }
+                for row in range(self.node_table.rowCount()):
+                    logic_id = int(self.node_table.item(row, 1).text())
+                    if logic_id in verdicts:
+                        self.node_table.item(row, 5).setText(verdicts[logic_id])
+                self.diag_console.appendPlainText(f"[完成] {action}")
+            elif action == "diagnostics.broadcast" and isinstance(payload, dict):
+                responses = {int(value) for value in payload.get("responses", {})}
+                for row in range(self.node_table.rowCount()):
+                    logic_id = int(self.node_table.item(row, 1).text())
+                    self.node_table.item(row, 5).setText("已应答" if logic_id in responses else "无应答")
+                self.diag_console.appendPlainText(
+                    f"[广播] {str(payload.get('interface', '')).upper()} · "
+                    f"{len(responses)}/{self.node_table.rowCount()} 节点应答"
+                )
             else:
                 self.diag_console.appendPlainText(f"[完成] {action}")
         if action == "diagnostics.stress_start" and event in {"succeeded", "failed", "cancelled"}:

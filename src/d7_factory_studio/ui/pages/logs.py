@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QTableWidget,
     QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
@@ -23,6 +22,7 @@ from d7_factory_studio.application import ApplicationState
 from d7_factory_studio.core.models import LinkState
 from d7_factory_studio.settings_store import SettingsStore
 from d7_factory_studio.ui.controls import D7DateTimeEdit as QDateTimeEdit
+from d7_factory_studio.ui.controls import D7TableWidget as QTableWidget
 from d7_factory_studio.ui.pages.base import InlineMessage, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, PageHeader
 
@@ -60,7 +60,6 @@ class LogsPage(WorkbenchPage):
         )
         self.activity_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.activity_table.verticalHeader().setVisible(False)
-        self.activity_table.setAlternatingRowColors(True)
         layout.addWidget(self.activity_table)
         return tab
 

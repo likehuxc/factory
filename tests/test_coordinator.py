@@ -139,6 +139,26 @@ def test_timing_route_uses_keyword_only_api(tmp_path: Path) -> None:
     assert result["candidate"].target_bitrate == 1_000_000
 
 
+def test_broadcast_uses_page_selected_interface(tmp_path: Path) -> None:
+    target = coordinator(tmp_path)
+    target._resources = ConnectionResources(
+        ConnectionMode.ORIN_REMOTE,
+        remote_session=FakeRemote(),  # type: ignore[arg-type]
+    )
+    captured: dict[str, object] = {}
+
+    def run_sync(action: str, operation, task_id: str | None = None) -> str:  # type: ignore[no-untyped-def]
+        del task_id
+        captured[action] = operation(CancellationToken(), lambda _value, _message: None)
+        return action
+
+    target._start = run_sync  # type: ignore[method-assign]
+    target._handle_diagnostics("diagnostics.broadcast", {"interface": "can2"})
+    result = captured["diagnostics.broadcast"]
+    assert isinstance(result, dict)
+    assert result["interface"] == "can2"
+
+
 def test_motor_write_is_rejected_while_safety_locked(tmp_path: Path) -> None:
     target = coordinator(tmp_path)
     target._resources.motor_service = object()  # type: ignore[assignment]

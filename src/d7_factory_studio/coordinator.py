@@ -576,7 +576,10 @@ class ApplicationCoordinator(QObject):
                     on_output=emit,
                 )
             if action == "diagnostics.broadcast":
-                return service.run_broadcast(self.state.active_interface, 60, token, on_output=emit)
+                interface = str(payload.get("interface", ""))
+                if interface not in self.state.evt.interfaces:
+                    raise ValueError(f"当前 {self.state.evt.variant} 不包含接口 {interface}")
+                return service.run_broadcast(interface, 60, token, on_output=emit)
             if action in {"diagnostics.timing_calculate", "diagnostics.tdc_calculate"}:
                 from d7_factory_studio.features.diagnostics.timing import best_candidate, tdcr
 
@@ -620,7 +623,8 @@ class ApplicationCoordinator(QObject):
         if action == "machine.can_monitor_stop":
             self._cancel_action("machine.can_monitor_start")
             return
-        transport = self._require_can()
+        selected_interface = payload.get("interface")
+        transport = self._require_can(str(selected_interface) if selected_interface else None)
 
         def operation(token: CancellationToken, report) -> object:
             if action == "machine.can_send":
@@ -729,7 +733,9 @@ class ApplicationCoordinator(QObject):
     ) -> dict[str, object]:
         from d7_factory_studio.features.diagnostics.timing import best_candidate, tdcr
 
-        interface = self.state.active_interface
+        interface = str(payload.get("interface", ""))
+        if interface not in self.state.evt.interfaces:
+            raise ValueError(f"当前 {self.state.evt.variant} 不包含接口 {interface}")
         candidate = best_candidate(
             clock_hz=int(float(payload.get("clock_mhz", 40)) * 1_000_000),
             bitrate=5_000_000,
@@ -834,17 +840,29 @@ class ApplicationCoordinator(QObject):
         elif event_type in {"safety", "state.error"}:
             self.state.lock(f"Orin agent 安全事件: {message.get('reason') or message.get('message')}")
 
-    def _require_can(self) -> CanTransport:
+    def _require_can(self, interface: str | None = None) -> CanTransport:
         transport = self._resources.can_transport
+        requested = interface or (
+            transport.bus if isinstance(transport, AgentCanTransport) else self.state.active_interface
+        )
+        if requested not in self.state.evt.interfaces:
+            raise ValueError(f"当前 {self.state.evt.variant} 不包含接口 {requested}")
+        if (
+            self._resources.mode is ConnectionMode.ORIN_REMOTE
+            and isinstance(transport, AgentCanTransport)
+            and transport.bus != requested
+        ):
+            transport.close()
+            transport = None
+            self._resources.can_transport = None
+        if transport is None and self._resources.mode is ConnectionMode.ORIN_REMOTE:
+            client = self._require_agent()
+            config = self.state.evt.interfaces[requested]
+            transport = AgentCanTransport(client, requested)
+            transport.open(0, config.mode)
+            self._resources.can_transport = transport
         if transport is None:
-            if self._resources.mode is ConnectionMode.ORIN_REMOTE:
-                client = self._require_agent()
-                interface = self.state.evt.interfaces[self.state.active_interface]
-                transport = AgentCanTransport(client, self.state.active_interface)
-                transport.open(0, interface.mode)
-                self._resources.can_transport = transport
-            else:
-                raise RuntimeError("CAN 尚未连接")
+            raise RuntimeError("CAN 尚未连接")
         return transport
 
     def _require_remote(self) -> RemoteSession:

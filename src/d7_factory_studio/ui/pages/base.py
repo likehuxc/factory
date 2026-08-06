@@ -76,5 +76,5 @@ class LogConsole(QPlainTextEdit):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet(
             "QPlainTextEdit {font-family:'JetBrains Mono','Cascadia Mono',monospace; "
-            "font-size:13px; color:#D6E1F0; background:#172235; border:none; border-radius:8px; padding:10px;}"
+            "font-size:15px; color:#D6E1F0; background:#172235; border:none; border-radius:8px; padding:10px;}"
         )

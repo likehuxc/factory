@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from d7_factory_studio.app import create_application
 from d7_factory_studio.ui.controls import D7SpinBox
@@ -16,6 +16,7 @@ from d7_factory_studio.ui.main_window import MainWindow
 
 def test_primary_and_motor_navigation() -> None:
     app = create_application([])
+    assert not app.windowIcon().isNull()
     window = MainWindow()
     assert window.primary_buttons["home"].isChecked()
     assert not window.secondary.isVisible()
@@ -25,6 +26,25 @@ def test_primary_and_motor_navigation() -> None:
     assert window.pages.currentIndex() == window.page_indexes["motor.nodes"]
     window.secondary_buttons["motor.can"].click()
     assert window.pages.currentIndex() == window.page_indexes["motor.can"]
+    window.close()
+    app.processEvents()
+
+
+def test_diagnostic_interfaces_use_multi_select_choice_buttons() -> None:
+    app = create_application([])
+    window = MainWindow()
+    page = window.pages.widget(window.page_indexes["diagnostics"])
+    buttons = [
+        page.interface_checks.itemAt(index).widget()
+        for index in range(page.interface_checks.count())
+        if isinstance(page.interface_checks.itemAt(index).widget(), QPushButton)
+    ]
+    assert len(buttons) == len(window.state.evt.interfaces)
+    assert all(button.isCheckable() and button.isChecked() for button in buttons)
+
+    first_interface = str(buttons[0].property("interface"))
+    buttons[0].click()
+    assert first_interface not in page._selected_interfaces()
     window.close()
     app.processEvents()
 

@@ -11,8 +11,9 @@ datas = [
     (str(package_root / "config" / "evt2.yaml"), "d7_factory_studio/config"),
     (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
 ]
-for resource in sorted((package_root / "resources").glob("*.svg")):
-    datas.append((str(resource), "d7_factory_studio/resources"))
+for pattern in ("*.svg", "*.png"):
+    for resource in sorted((package_root / "resources").glob(pattern)):
+        datas.append((str(resource), "d7_factory_studio/resources"))
 
 agent_binary = project_root / "artifacts" / "agent" / "aarch64" / "d7-factory-agent"
 if agent_binary.is_file():
@@ -52,4 +53,5 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch="x86_64",
+    icon=str(package_root / "resources" / "app-icon.ico"),
 )

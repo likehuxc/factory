@@ -92,7 +92,7 @@ class PrimaryNavButton(QToolButton):
         self.setCheckable(True)
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.setIconSize(self.iconSize().expandedTo(self.iconSize()))
-        self.setFixedSize(76, 64)
+        self.setFixedSize(76, 68)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggled.connect(self._update_appearance)
         self._update_appearance(False)
@@ -104,7 +104,7 @@ class PrimaryNavButton(QToolButton):
         hover = COLORS["primary"] if checked else COLORS["sidebar_hover"]
         self.setStyleSheet(
             f"QToolButton {{color:{color}; background:{background}; border:none; border-radius:10px; "
-            "font-size:12px; font-weight:600; padding:5px 3px;}"
+            "font-size:14px; font-weight:600; padding:5px 3px;}"
             f"QToolButton:hover {{background:{hover}; color:white;}}"
         )
 
@@ -114,7 +114,7 @@ class SecondaryNavButton(QPushButton):
         super().__init__(text, parent)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(38)
+        self.setMinimumHeight(42)
         self.toggled.connect(self._update_appearance)
         self._update_appearance(False)
 
@@ -147,7 +147,7 @@ class SegmentedControl(QWidget):
             button = QPushButton(text)
             button.setCheckable(True)
             button.setProperty("segmentKey", key)
-            button.setMinimumHeight(30)
+            button.setMinimumHeight(34)
             button.setStyleSheet(
                 f"QPushButton {{border:none; min-height:30px; padding:0 12px; color:{COLORS['muted']}; "
                 "background:transparent; border-radius:6px;}"
@@ -182,7 +182,7 @@ class StatusPill(QLabel):
         self.setText(text)
         self.setStyleSheet(
             f"color:{foreground}; background:{background}; border-radius:9px; "
-            "padding:4px 9px; font-size:12px; font-weight:700;"
+            "padding:4px 9px; font-size:14px; font-weight:700;"
         )
 
 
@@ -193,7 +193,7 @@ class StatusRail(QWidget):
         super().__init__(parent)
         self.state = state
         self.setObjectName("TopRail")
-        self.setFixedHeight(66)
+        self.setFixedHeight(70)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(20, 10, 22, 10)
         layout.setSpacing(12)

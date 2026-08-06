@@ -36,7 +36,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-d7_factory_studio = ["config/*.yaml", "resources/*.svg"]
+d7_factory_studio = ["config/*.yaml", "resources/*.svg", "resources/*.png", "resources/*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

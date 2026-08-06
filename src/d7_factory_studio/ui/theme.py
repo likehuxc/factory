@@ -31,25 +31,24 @@ def stylesheet() -> str:
     return f"""
     * {{
         font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
-        font-size: 14px;
+        font-size: 16px;
         color: {c["ink"]};
     }}
     QMainWindow, QWidget#AppRoot {{ background: {c["canvas"]}; }}
     QWidget#PrimarySidebar {{ background: {c["sidebar"]}; }}
     QWidget#SecondarySidebar {{ background: {c["surface"]}; border-right: 1px solid {c["line"]}; }}
     QWidget#TopRail {{ background: {c["surface"]}; border-bottom: 1px solid {c["line"]}; }}
-    QLabel#BrandMark {{ color: white; font-size: 20px; font-weight: 700; }}
-    QLabel#BrandCaption {{ color: #94A5BE; font-size: 11px; font-weight: 600; }}
-    QLabel#PageTitle {{ font-size: 26px; font-weight: 700; }}
-    QLabel#PageCaption {{ color: {c["muted"]}; font-size: 14px; }}
-    QLabel#SectionTitle {{ font-size: 17px; font-weight: 700; }}
-    QLabel#MetricValue {{ font-family: "Bahnschrift", "Segoe UI Variable"; font-size: 28px; font-weight: 600; }}
+    QLabel#BrandCaption {{ color: #A9B8CC; font-size: 13px; font-weight: 700; }}
+    QLabel#PageTitle {{ font-size: 28px; font-weight: 700; }}
+    QLabel#PageCaption {{ color: {c["muted"]}; font-size: 16px; }}
+    QLabel#SectionTitle {{ font-size: 19px; font-weight: 700; }}
+    QLabel#MetricValue {{ font-family: "Bahnschrift", "Segoe UI Variable"; font-size: 30px; font-weight: 600; }}
     QLabel#Muted {{ color: {c["muted"]}; }}
     QLabel#Mono {{ font-family: "JetBrains Mono", "Cascadia Mono", monospace; }}
     QFrame#Card {{ background: {c["surface"]}; border: 1px solid {c["line"]}; border-radius: 10px; }}
     QFrame#SoftPanel {{ background: {c["surface_muted"]}; border: none; border-radius: 9px; }}
     QPushButton {{
-        min-height: 38px; padding: 0 15px; border-radius: 9px;
+        min-height: 42px; padding: 0 16px; border-radius: 9px;
         border: 1px solid {c["line"]}; background: {c["surface"]}; font-weight: 600;
     }}
     QPushButton:hover {{ border-color: #A9BAD0; background: #F9FBFD; }}
@@ -60,8 +59,17 @@ def stylesheet() -> str:
     QPushButton[primary="true"]:hover {{ background: #1759DF; }}
     QPushButton[danger="true"] {{ color: {c["danger"]}; border-color: #F0BABA; background: #FFF7F7; }}
     QPushButton[ghost="true"] {{ border: none; background: transparent; }}
+    QPushButton[choice="true"] {{
+        min-height: 40px; padding: 0 16px; border-radius: 10px;
+        color: {c["muted"]}; border: 1px solid {c["line"]}; background: {c["surface"]};
+    }}
+    QPushButton[choice="true"]:hover {{ color: {c["primary"]}; border-color: #9DBBFF; background: #F7FAFF; }}
+    QPushButton[choice="true"]:checked {{
+        color: {c["primary"]}; border: 2px solid {c["primary"]}; background: {c["primary_soft"]};
+        font-weight: 700;
+    }}
     QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {{
-        min-height: 38px; padding: 0 10px; border: 1px solid {c["line"]};
+        min-height: 42px; padding: 0 11px; border: 1px solid {c["line"]};
         border-radius: 9px; background: {c["surface"]}; selection-background-color: {c["primary"]};
     }}
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {c["primary"]}; }}

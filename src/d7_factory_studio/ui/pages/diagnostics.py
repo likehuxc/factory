@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -79,6 +80,7 @@ class DiagnosticsPage(WorkbenchPage):
         self.interface_checks_widget = QWidget()
         self.interface_checks = QHBoxLayout(self.interface_checks_widget)
         self.interface_checks.setContentsMargins(0, 0, 0, 0)
+        self.interface_checks.setSpacing(8)
         setup.body.addWidget(self.interface_checks_widget)
         evidence = QHBoxLayout()
         self.capture_dmesg = QCheckBox("采集 dmesg 增量")
@@ -219,10 +221,13 @@ class DiagnosticsPage(WorkbenchPage):
     def _rebuild_interfaces(self) -> None:
         clear_layout(self.interface_checks)
         for name, interface in self.state.evt.interfaces.items():
-            check = QCheckBox(f"{name.upper()} · {'FD' if interface.mode.value == 'fd' else 'Classic'}")
-            check.setProperty("interface", name)
-            check.setChecked(True)
-            self.interface_checks.addWidget(check)
+            button = QPushButton(f"{name.upper()} · {'FD' if interface.mode.value == 'fd' else 'Classic'}")
+            button.setCheckable(True)
+            button.setChecked(True)
+            button.setProperty("choice", True)
+            button.setProperty("interface", name)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.interface_checks.addWidget(button)
         self.interface_checks.addStretch(1)
         if hasattr(self, "node_table"):
             self.node_table.setRowCount(0)
@@ -240,7 +245,7 @@ class DiagnosticsPage(WorkbenchPage):
         result = []
         for index in range(self.interface_checks.count()):
             widget = self.interface_checks.itemAt(index).widget()
-            if isinstance(widget, QCheckBox) and widget.isChecked():
+            if isinstance(widget, QPushButton) and widget.isChecked():
                 result.append(str(widget.property("interface")))
         return result
 

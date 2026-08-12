@@ -20,14 +20,49 @@ def probe_request() -> RemoteCommandRequest:
 
 def environment_requests() -> tuple[RemoteCommandRequest, ...]:
     return (
+        required_tools_request(),
         RemoteCommandRequest(("uname", "-a"), evidence_label="uname"),
         RemoteCommandRequest(("cat", "/etc/os-release"), evidence_label="os-release"),
         RemoteCommandRequest(("cat", "/proc/device-tree/model"), evidence_label="device-model"),
     )
 
 
-def configure_requests(config: CanInterfaceConfig) -> tuple[RemoteCommandRequest, ...]:
-    type_args = ["sudo", "ip", "link", "set", config.name, "type", "can", "bitrate", str(config.bitrate)]
+def required_tools_request() -> RemoteCommandRequest:
+    tools = ("ip", "dmesg", "timeout", "cangen", "candump", "python3")
+    script = (
+        'missing=""; for tool in "$@"; do '
+        'command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"; '
+        'done; if [ -n "$missing" ]; then '
+        'echo "missing required tools:$missing" >&2; exit 127; fi; '
+        'printf "required tools available:"; printf " %s" "$@"; printf "\\n"'
+    )
+    return RemoteCommandRequest(
+        ("sh", "-c", script, "d7-tool-probe", *tools),
+        timeout_s=20,
+        evidence_label="required-tools",
+    )
+
+
+def _sudo_request(
+    argv: tuple[str, ...],
+    *,
+    sudo_password: str | None,
+    timeout_s: float = 30,
+    evidence_label: str,
+) -> RemoteCommandRequest:
+    prefix = ("sudo", "-S", "-p", "", "--") if sudo_password is not None else ("sudo", "--")
+    return RemoteCommandRequest(
+        (*prefix, *argv),
+        timeout_s=timeout_s,
+        stdin_secret=sudo_password,
+        evidence_label=evidence_label,
+    )
+
+
+def configure_requests(
+    config: CanInterfaceConfig, sudo_password: str | None = None
+) -> tuple[RemoteCommandRequest, ...]:
+    type_args = ["ip", "link", "set", config.name, "type", "can", "bitrate", str(config.bitrate)]
     if config.sample_point is not None:
         type_args.extend(("sample-point", str(config.sample_point)))
     if config.mode is CanMode.FD:
@@ -38,12 +73,20 @@ def configure_requests(config: CanInterfaceConfig) -> tuple[RemoteCommandRequest
         type_args.extend(("fd", "off"))
     type_args.extend(("berr-reporting", "on", "restart-ms", str(config.restart_ms)))
     return (
-        RemoteCommandRequest(
-            ("sudo", "ip", "link", "set", config.name, "down"), evidence_label=f"{config.name}-down"
+        _sudo_request(
+            ("ip", "link", "set", config.name, "down"),
+            sudo_password=sudo_password,
+            evidence_label=f"{config.name}-down",
         ),
-        RemoteCommandRequest(tuple(type_args), evidence_label=f"{config.name}-configure"),
-        RemoteCommandRequest(
-            ("sudo", "ip", "link", "set", config.name, "up"), evidence_label=f"{config.name}-up"
+        _sudo_request(
+            tuple(type_args),
+            sudo_password=sudo_password,
+            evidence_label=f"{config.name}-configure",
+        ),
+        _sudo_request(
+            ("ip", "link", "set", config.name, "up"),
+            sudo_password=sudo_password,
+            evidence_label=f"{config.name}-up",
         ),
         RemoteCommandRequest(
             ("ip", "-details", "-statistics", "link", "show", config.name),
@@ -52,10 +95,26 @@ def configure_requests(config: CanInterfaceConfig) -> tuple[RemoteCommandRequest
     )
 
 
-def clear_dmesg_request(*, high_risk_confirmed: bool = False) -> RemoteCommandRequest:
+def clear_dmesg_request(
+    *, high_risk_confirmed: bool = False, sudo_password: str | None = None
+) -> RemoteCommandRequest:
     if not high_risk_confirmed:
         raise PermissionError("dmesg -C 默认禁用；必须显式确认 high_risk_confirmed")
-    return RemoteCommandRequest(("sudo", "dmesg", "-C"), timeout_s=20, evidence_label="HIGH-RISK-clear-dmesg")
+    return _sudo_request(
+        ("dmesg", "-C"),
+        sudo_password=sudo_password,
+        timeout_s=20,
+        evidence_label="HIGH-RISK-clear-dmesg",
+    )
+
+
+def dmesg_snapshot_request(sudo_password: str | None = None) -> RemoteCommandRequest:
+    return _sudo_request(
+        ("dmesg", "--time-format", "iso"),
+        sudo_password=sudo_password,
+        timeout_s=30,
+        evidence_label="dmesg-before-high-risk-clear",
+    )
 
 
 def _safe_random_command(evt: EvtConfig, config: CanInterfaceConfig, stage: DiagnosticStage) -> str:

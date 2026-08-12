@@ -13,42 +13,35 @@ from PySide6.QtWidgets import (
 
 from d7_factory_studio.application import ApplicationState
 from d7_factory_studio.coordinator import ApplicationCoordinator
-from d7_factory_studio.core.models import LinkState
 from d7_factory_studio.settings_store import SettingsStore
-from d7_factory_studio.ui.pages.diagnostics import DiagnosticsPage
+from d7_factory_studio.ui.pages.diagnostics import LinkTestPage, NodeTestPage
 from d7_factory_studio.ui.pages.firmware import FirmwarePage
-from d7_factory_studio.ui.pages.home import HomePage
 from d7_factory_studio.ui.pages.logs import LogsPage
 from d7_factory_studio.ui.pages.machine import MachinePage
 from d7_factory_studio.ui.pages.motor import (
-    CanMotionPage,
-    LongTestPage,
-    NodeOverviewPage,
-    ParameterPage,
-    Serial485Page,
+    CanControlPage,
+    MotorIdPage,
+    Serial485ControlPage,
     ZeroCalibrationPage,
 )
 from d7_factory_studio.ui.pages.settings import SettingsPage
-from d7_factory_studio.ui.widgets import PrimaryNavButton, SecondaryNavButton, StatusRail
+from d7_factory_studio.ui.widgets import SecondaryNavButton, StatusRail
 
 
 class MainWindow(QMainWindow):
-    PRIMARY_ITEMS = (
-        ("home", "首页", "home"),
-        ("firmware", "升级", "upgrade"),
-        ("motor", "电机", "motor"),
-        ("diagnostics", "诊断", "diagnostics"),
-        ("machine", "整机", "machine"),
-        ("logs", "日志", "logs"),
-        ("settings", "设置", "settings"),
+    CALIBRATION_ITEMS = (
+        ("motor.id", "1  电机 ID 写入"),
+        ("diagnostics.link", "2  链路测试"),
+        ("diagnostics.nodes", "3  电机节点测试"),
+        ("motor.zero", "4  电机标零"),
     )
-    MOTOR_ITEMS = (
-        ("节点总览", "motor.nodes"),
-        ("CAN 运动", "motor.can"),
-        ("485 控制", "motor.485"),
-        ("参数", "motor.parameters"),
-        ("零位", "motor.zero"),
-        ("长测", "motor.long_test"),
+    TOOL_ITEMS = (
+        ("motor.485", "电机控制 485"),
+        ("motor.can", "电机控制 CAN"),
+        ("firmware", "OTA 升级"),
+        ("machine", "整机工具"),
+        ("logs", "设备日志"),
+        ("settings", "设置"),
     )
 
     def __init__(self, state: ApplicationState | None = None) -> None:
@@ -70,35 +63,35 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
         self.setCentralWidget(root)
 
-        primary = QWidget()
-        primary.setObjectName("PrimarySidebar")
-        primary.setFixedWidth(92)
-        primary_layout = QVBoxLayout(primary)
-        primary_layout.setContentsMargins(8, 16, 8, 12)
-        primary_layout.setSpacing(5)
+        sidebar = QWidget()
+        sidebar.setObjectName("SecondarySidebar")
+        sidebar.setFixedWidth(228)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(16, 18, 16, 16)
+        sidebar_layout.setSpacing(5)
+
+        brand_row = QHBoxLayout()
         brand = QLabel()
         brand.setObjectName("BrandMark")
+        brand.setPixmap(self.windowIcon().pixmap(QSize(42, 42)))
+        brand.setFixedSize(46, 46)
         brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand.setPixmap(self.windowIcon().pixmap(QSize(50, 50)))
-        caption = QLabel("D7 FACTORY\nSTUDIO")
-        caption.setObjectName("BrandCaption")
-        caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        primary_layout.addWidget(brand)
-        primary_layout.addWidget(caption)
-        primary_layout.addSpacing(15)
-        self.primary_group = QButtonGroup(self)
-        self.primary_group.setExclusive(True)
-        self.primary_buttons: dict[str, PrimaryNavButton] = {}
-        for index, (key, label, icon) in enumerate(self.PRIMARY_ITEMS):
-            if key == "settings":
-                primary_layout.addStretch(1)
-            button = PrimaryNavButton(label, icon)
-            button.setProperty("pageKey", key)
-            button.clicked.connect(lambda _checked=False, selected=key: self.select_primary(selected))
-            self.primary_group.addButton(button, index)
-            self.primary_buttons[key] = button
-            primary_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
-        root_layout.addWidget(primary)
+        brand_text = QLabel("D7 产线工作台")
+        brand_text.setObjectName("SectionTitle")
+        brand_row.addWidget(brand)
+        brand_row.addWidget(brand_text, 1)
+        sidebar_layout.addLayout(brand_row)
+        sidebar_layout.addSpacing(18)
+
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        self.nav_buttons: dict[str, SecondaryNavButton] = {}
+        self._add_nav_section(sidebar_layout, "电机标定步骤", self.CALIBRATION_ITEMS)
+        sidebar_layout.addSpacing(18)
+        self._add_nav_section(sidebar_layout, "其它工具", self.TOOL_ITEMS)
+        sidebar_layout.addStretch(1)
+        root_layout.addWidget(sidebar)
+        self.sidebar = sidebar
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -106,100 +99,53 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(0)
         root_layout.addWidget(right, 1)
 
-        self.status_rail = StatusRail(self.state)
-        self.status_rail.connect_requested.connect(self._toggle_connection)
+        self.status_rail = StatusRail(self.state, self.settings)
         right_layout.addWidget(self.status_rail)
-
-        workspace = QWidget()
-        workspace_layout = QHBoxLayout(workspace)
-        workspace_layout.setContentsMargins(0, 0, 0, 0)
-        workspace_layout.setSpacing(0)
-        right_layout.addWidget(workspace, 1)
-
-        self.secondary = QWidget()
-        self.secondary.setObjectName("SecondarySidebar")
-        self.secondary.setFixedWidth(202)
-        secondary_layout = QVBoxLayout(self.secondary)
-        secondary_layout.setContentsMargins(14, 22, 14, 18)
-        secondary_layout.setSpacing(5)
-        module_title = QLabel("电机工作台")
-        module_title.setObjectName("SectionTitle")
-        module_caption = QLabel("D7 ACTUATORS")
-        module_caption.setObjectName("BrandCaption")
-        module_caption.setStyleSheet("color:#7D8BA0;")
-        secondary_layout.addWidget(module_title)
-        secondary_layout.addWidget(module_caption)
-        secondary_layout.addSpacing(12)
-        self.secondary_group = QButtonGroup(self)
-        self.secondary_group.setExclusive(True)
-        self.secondary_buttons: dict[str, SecondaryNavButton] = {}
-        for index, (label, key) in enumerate(self.MOTOR_ITEMS):
-            button = SecondaryNavButton(label)
-            button.clicked.connect(lambda _checked=False, selected=key: self._show_page(selected))
-            self.secondary_group.addButton(button, index)
-            self.secondary_buttons[key] = button
-            secondary_layout.addWidget(button)
-        secondary_layout.addStretch(1)
-        safety_note = QLabel("运动指令受顶部\n会话安全锁保护")
-        safety_note.setObjectName("Muted")
-        safety_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        secondary_layout.addWidget(safety_note)
-        workspace_layout.addWidget(self.secondary)
-
         self.pages = QStackedWidget()
-        workspace_layout.addWidget(self.pages, 1)
-        self.page_indexes: dict[str, int] = {}
-        home = HomePage(self.state)
-        home.navigate_requested.connect(self.select_primary)
+        right_layout.addWidget(self.pages, 1)
+
         page_instances = (
-            ("home", home),
-            ("firmware", FirmwarePage(self.state)),
-            ("motor.nodes", NodeOverviewPage(self.state)),
-            ("motor.can", CanMotionPage(self.state)),
-            ("motor.485", Serial485Page(self.state)),
-            ("motor.parameters", ParameterPage(self.state)),
+            ("motor.id", MotorIdPage(self.state, self.settings)),
+            ("diagnostics.link", LinkTestPage(self.state)),
+            ("diagnostics.nodes", NodeTestPage(self.state)),
             ("motor.zero", ZeroCalibrationPage(self.state)),
-            ("motor.long_test", LongTestPage(self.state)),
-            ("diagnostics", DiagnosticsPage(self.state)),
+            ("motor.485", Serial485ControlPage(self.state, self.settings)),
+            ("motor.can", CanControlPage(self.state, self.settings)),
+            ("firmware", FirmwarePage(self.state)),
             ("machine", MachinePage(self.state)),
             ("logs", LogsPage(self.state, self.settings)),
             ("settings", SettingsPage(self.state, self.settings)),
         )
+        self.page_indexes: dict[str, int] = {}
         for key, page in page_instances:
             self.page_indexes[key] = self.pages.addWidget(page)
-        self.select_primary("home")
+        self.show_page("motor.id")
 
-    def select_primary(self, key: str) -> None:
-        if key not in self.primary_buttons:
-            return
-        self.primary_buttons[key].setChecked(True)
-        is_motor = key == "motor"
-        self.secondary.setVisible(is_motor)
-        if is_motor:
-            self.secondary_buttons["motor.nodes"].setChecked(True)
-            self._show_page("motor.nodes")
-        else:
-            self._show_page(key)
+    def _add_nav_section(
+        self,
+        layout: QVBoxLayout,
+        title: str,
+        items: tuple[tuple[str, str], ...],
+    ) -> None:
+        heading = QLabel(title)
+        heading.setObjectName("BrandCaption")
+        heading.setStyleSheet("color:#7D8BA0; padding:0 8px 5px 8px;")
+        layout.addWidget(heading)
+        for key, label in items:
+            button = SecondaryNavButton(label)
+            button.setProperty("pageKey", key)
+            button.clicked.connect(lambda _checked=False, selected=key: self.show_page(selected))
+            self.nav_group.addButton(button)
+            self.nav_buttons[key] = button
+            layout.addWidget(button)
 
-    def _show_page(self, key: str) -> None:
+    def show_page(self, key: str) -> None:
         index = self.page_indexes.get(key)
-        if index is not None:
-            self.pages.setCurrentIndex(index)
-
-    def _toggle_connection(self) -> None:
-        if self.state.link_state is LinkState.CONNECTED:
-            self.state.request("connection.disconnect")
+        if index is None:
             return
-        if self.state.link_state is LinkState.CONNECTING:
-            return
-        self.state.set_link_state(LinkState.CONNECTING)
-        self.state.request(
-            "connection.connect",
-            mode=self.state.connection_mode.value,
-            evt=self.state.evt.variant,
-        )
+        self.nav_buttons[key].setChecked(True)
+        self.pages.setCurrentIndex(index)
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        self.state.lock("应用退出，已请求所有运动目标停止并失能")
         self.coordinator.shutdown()
         super().closeEvent(event)

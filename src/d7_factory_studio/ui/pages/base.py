@@ -40,10 +40,11 @@ class FormSection(QWidget):
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-    def add_field(self, label: str, widget: QWidget) -> None:
+    def add_field(self, label: str, widget: QWidget) -> QLabel:
         title = QLabel(label)
         title.setObjectName("Muted")
         self.form.addRow(title, widget)
+        return title
 
 
 class InlineMessage(QFrame):

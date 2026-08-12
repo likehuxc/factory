@@ -16,12 +16,15 @@ def application_icon_path() -> Path:
 
 
 def create_application(argv: list[str] | None = None) -> QApplication:
-    existing = QApplication.instance()
-    if isinstance(existing, QApplication):
-        return existing
     QCoreApplication.setOrganizationName("Pudu Robotics")
     QCoreApplication.setApplicationName("D7 Factory Studio")
     QCoreApplication.setApplicationVersion("0.1.0")
+    existing = QApplication.instance()
+    if isinstance(existing, QApplication):
+        existing.setStyle("Fusion")
+        existing.setWindowIcon(QIcon(str(application_icon_path())))
+        apply_theme(existing)
+        return existing
     app = QApplication(argv if argv is not None else sys.argv)
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(str(application_icon_path())))

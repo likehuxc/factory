@@ -26,7 +26,7 @@ class HomePage(WorkbenchPage):
         super().__init__()
         self.state = state
         self.layout.addWidget(
-            PageHeader("D7 功能工作台", "用一条清晰的设备链路组织升级、电机、诊断和整机任务。")
+            PageHeader("D7 功能工作台", "升级、电机、诊断和整机功能分别选择自己的通信方式。")
         )
 
         overview = Card()
@@ -35,8 +35,7 @@ class HomePage(WorkbenchPage):
         self.connection_metric = Metric("连接链路", "未连接", COLORS["primary"])
         self.nodes_metric = Metric("在线节点", "0 / 30", COLORS["teal"])
         self.evt_metric = Metric("整机配置", "EVT2", COLORS["warning"])
-        self.lock_metric = Metric("运动安全", "已锁定", COLORS["danger"])
-        for metric in (self.connection_metric, self.nodes_metric, self.evt_metric, self.lock_metric):
+        for metric in (self.connection_metric, self.nodes_metric, self.evt_metric):
             metrics.addWidget(metric)
         metrics.addStretch(1)
         overview.body.addLayout(metrics)
@@ -54,7 +53,7 @@ class HomePage(WorkbenchPage):
         bus_card.body.addWidget(self.bus_table)
         middle.addWidget(bus_card, 3)
 
-        quick_card = Card("快捷操作", "所有硬件操作都会遵守当前连接通道和安全锁。")
+        quick_card = Card("快捷操作", "进入功能后选择 CAN 盒、Orin 或 485。")
         grid = QGridLayout()
         actions = [
             ("升级 PMU", "firmware"),
@@ -98,11 +97,10 @@ class HomePage(WorkbenchPage):
             LinkState.CONNECTED: "已连接",
             LinkState.FAULT: "故障",
         }[self.state.link_state]
-        mode = "PC" if self.state.connection_mode.value == "pc_direct" else "Orin"
+        mode = "CAN 盒" if self.state.connection_mode.value == "pc_direct" else "Orin"
         self.connection_metric.set_value(f"{mode} · {link_text}")
         self.nodes_metric.set_value(f"{self.state.online_nodes} / {len(self.state.evt.nodes)}")
         self.evt_metric.set_value(self.state.evt.variant)
-        self.lock_metric.set_value("已锁定" if self.state.safety_locked else "已解锁")
         self.bus_table.setRowCount(0)
         for name, interface in self.state.evt.interfaces.items():
             row = self.bus_table.rowCount()

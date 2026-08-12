@@ -10,28 +10,28 @@ interfaces:
   can3: {role: ota, mode: classic, bitrate: 500000, restart_ms: 100}
 
 nodes:
-  - {label: 头部偏航, name: neck_yaw_joint, logic_id: 1, dev_id: 0x11, group: HEAD_TORSO, bus: can7}
-  - {label: 头部俯仰, name: neck_pitch_joint, logic_id: 2, dev_id: 0x12, group: HEAD_TORSO, bus: can7}
-  - {label: 躯干关节1, name: torso_joint1, logic_id: 3, dev_id: 0x13, group: HEAD_TORSO, bus: can7}
-  - {label: 躯干关节2, name: torso_joint2, logic_id: 4, dev_id: 0x14, group: HEAD_TORSO, bus: can7}
-  - {label: 躯干关节3, name: torso_joint3, logic_id: 5, dev_id: 0x15, group: HEAD_TORSO, bus: can7}
-  - {label: 躯干关节4, name: torso_joint4, logic_id: 6, dev_id: 0x16, group: HEAD_TORSO, bus: can7}
-  - {label: 左臂关节1, name: left_arm_joint1, logic_id: 7, dev_id: 0x21, group: LEFT_ARM, bus: can1}
-  - {label: 左臂关节2, name: left_arm_joint2, logic_id: 8, dev_id: 0x22, group: LEFT_ARM, bus: can1}
-  - {label: 左臂关节3, name: left_arm_joint3, logic_id: 9, dev_id: 0x23, group: LEFT_ARM, bus: can1}
-  - {label: 左臂关节4, name: left_arm_joint4, logic_id: 10, dev_id: 0x24, group: LEFT_ARM, bus: can1}
-  - {label: 左臂关节5, name: left_arm_joint5, logic_id: 11, dev_id: 0x25, group: LEFT_ARM, bus: can1}
-  - {label: 左臂关节6, name: left_arm_joint6, logic_id: 12, dev_id: 0x26, group: LEFT_ARM, bus: can1}
-  - {label: 左臂关节7, name: left_arm_joint7, logic_id: 13, dev_id: 0x27, group: LEFT_ARM, bus: can1}
-  - {label: 左臂灵巧手, name: left_gripper_joint, logic_id: 14, dev_id: 0x28, group: LEFT_ARM, bus: can1}
-  - {label: 右臂关节1, name: right_arm_joint1, logic_id: 15, dev_id: 0x31, group: RIGHT_ARM, bus: can0}
-  - {label: 右臂关节2, name: right_arm_joint2, logic_id: 16, dev_id: 0x32, group: RIGHT_ARM, bus: can0}
-  - {label: 右臂关节3, name: right_arm_joint3, logic_id: 17, dev_id: 0x33, group: RIGHT_ARM, bus: can0}
-  - {label: 右臂关节4, name: right_arm_joint4, logic_id: 18, dev_id: 0x34, group: RIGHT_ARM, bus: can0}
-  - {label: 右臂关节5, name: right_arm_joint5, logic_id: 19, dev_id: 0x35, group: RIGHT_ARM, bus: can0}
-  - {label: 右臂关节6, name: right_arm_joint6, logic_id: 20, dev_id: 0x36, group: RIGHT_ARM, bus: can0}
-  - {label: 右臂关节7, name: right_arm_joint7, logic_id: 21, dev_id: 0x37, group: RIGHT_ARM, bus: can0}
-  - {label: 右臂灵巧手, name: right_gripper_joint, logic_id: 22, dev_id: 0x38, group: RIGHT_ARM, bus: can0}
+  - {label: 头部偏航, name: neck_yaw_joint, factory_name: 14mini N2, logic_id: 1, dev_id: 0x11, group: HEAD_TORSO, bus: can7}
+  - {label: 头部俯仰, name: neck_pitch_joint, factory_name: 14mini N1, logic_id: 2, dev_id: 0x12, group: HEAD_TORSO, bus: can7}
+  - {label: 躯干关节1, name: torso_joint1, factory_name: 32 L1, logic_id: 3, dev_id: 0x13, group: HEAD_TORSO, bus: can7}
+  - {label: 躯干关节2, name: torso_joint2, factory_name: 32 L2, logic_id: 4, dev_id: 0x14, group: HEAD_TORSO, bus: can7}
+  - {label: 躯干关节3, name: torso_joint3, factory_name: 32 L3, logic_id: 5, dev_id: 0x15, group: HEAD_TORSO, bus: can7}
+  - {label: 躯干关节4, name: torso_joint4, factory_name: 32 L4, logic_id: 6, dev_id: 0x16, group: HEAD_TORSO, bus: can7}
+  - {label: 左臂关节1, name: left_arm_joint1, factory_name: 20 LA1, logic_id: 7, dev_id: 0x21, group: LEFT_ARM, bus: can1}
+  - {label: 左臂关节2, name: left_arm_joint2, factory_name: 20 LA2, logic_id: 8, dev_id: 0x22, group: LEFT_ARM, bus: can1}
+  - {label: 左臂关节3, name: left_arm_joint3, factory_name: 17 LA3, logic_id: 9, dev_id: 0x23, group: LEFT_ARM, bus: can1}
+  - {label: 左臂关节4, name: left_arm_joint4, factory_name: 17 LA4, logic_id: 10, dev_id: 0x24, group: LEFT_ARM, bus: can1}
+  - {label: 左臂关节5, name: left_arm_joint5, factory_name: 14 LA5, logic_id: 11, dev_id: 0x25, group: LEFT_ARM, bus: can1}
+  - {label: 左臂关节6, name: left_arm_joint6, factory_name: 14mini LA6, logic_id: 12, dev_id: 0x26, group: LEFT_ARM, bus: can1}
+  - {label: 左臂关节7, name: left_arm_joint7, factory_name: 14mini LA7, logic_id: 13, dev_id: 0x27, group: LEFT_ARM, bus: can1}
+  - {label: 左臂灵巧手, name: left_gripper_joint, factory_name: 14mini LA8, logic_id: 14, dev_id: 0x28, group: LEFT_ARM, bus: can1}
+  - {label: 右臂关节1, name: right_arm_joint1, factory_name: 20 RA1, logic_id: 15, dev_id: 0x31, group: RIGHT_ARM, bus: can0}
+  - {label: 右臂关节2, name: right_arm_joint2, factory_name: 20 RA2, logic_id: 16, dev_id: 0x32, group: RIGHT_ARM, bus: can0}
+  - {label: 右臂关节3, name: right_arm_joint3, factory_name: 17 RA3, logic_id: 17, dev_id: 0x33, group: RIGHT_ARM, bus: can0}
+  - {label: 右臂关节4, name: right_arm_joint4, factory_name: 17 RA4, logic_id: 18, dev_id: 0x34, group: RIGHT_ARM, bus: can0}
+  - {label: 右臂关节5, name: right_arm_joint5, factory_name: 14 RA5, logic_id: 19, dev_id: 0x35, group: RIGHT_ARM, bus: can0}
+  - {label: 右臂关节6, name: right_arm_joint6, factory_name: 14mini RA6, logic_id: 20, dev_id: 0x36, group: RIGHT_ARM, bus: can0}
+  - {label: 右臂关节7, name: right_arm_joint7, factory_name: 14mini RA7, logic_id: 21, dev_id: 0x37, group: RIGHT_ARM, bus: can0}
+  - {label: 右臂灵巧手, name: right_gripper_joint, factory_name: 14mini RA8, logic_id: 22, dev_id: 0x38, group: RIGHT_ARM, bus: can0}
   - {label: 左前转向, name: steering_lf_joint, logic_id: 23, dev_id: 0x51, group: CHASSIS, bus: can5}
   - {label: 左前轮, name: wheel_lf_joint, logic_id: 24, dev_id: 0x52, group: CHASSIS, bus: can5}
   - {label: 左后转向, name: steering_lb_joint, logic_id: 25, dev_id: 0x53, group: CHASSIS, bus: can5}
@@ -51,4 +51,3 @@ broadcast:
   request_id: 0x300
   response_base_id: 0x100
   reserved_ids: [0x000, 0x300, 0x7ff]
-

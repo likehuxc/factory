@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 import keyring
 from PySide6.QtCore import QSettings, QStandardPaths
 
 SERVICE_NAME = "D7 Factory Studio"
+
+
+def ssh_fingerprint_key(host: str) -> str:
+    """Return a QSettings-safe key for one SSH host's pinned fingerprint."""
+    normalized = host.strip().lower()
+    encoded = base64.urlsafe_b64encode(normalized.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"ssh/fingerprints/{encoded}"
 
 
 class SettingsStore:

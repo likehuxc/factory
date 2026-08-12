@@ -15,12 +15,8 @@ for pattern in ("*.svg", "*.png"):
     for resource in sorted((package_root / "resources").glob(pattern)):
         datas.append((str(resource), "d7_factory_studio/resources"))
 
-agent_binary = project_root / "artifacts" / "agent" / "aarch64" / "d7-factory-agent"
-if agent_binary.is_file():
-    datas.append((str(agent_binary), "d7_factory_studio/agent/aarch64"))
-    for agent_library in sorted((agent_binary.parent / "lib").glob("*.so*")):
-        if agent_library.is_file():
-            datas.append((str(agent_library), "d7_factory_studio/agent/aarch64/lib"))
+remote_can_agent = package_root / "agent" / "remote_can_agent.py"
+datas.append((str(remote_can_agent), "d7_factory_studio/agent"))
 
 hiddenimports = collect_submodules("keyring.backends")
 

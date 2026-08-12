@@ -22,7 +22,10 @@ def test_evt1_catalog_and_routes() -> None:
     assert len(config.nodes) == 30
     assert [node.logic_id for node in config.nodes] == list(range(1, 31))
     assert config.nodes_for_bus("can7")[0].name == "neck_yaw_joint"
+    assert config.nodes_for_bus("can7")[0].factory_name == "14mini N2"
+    assert config.nodes_for_bus("can1")[0].factory_name == "20 LA1"
     assert config.nodes_for_bus("can5")[-1].dev_id == 0x58
+    assert config.nodes_for_bus("can5")[-1].factory_name == ""
     assert config.interfaces["can3"].mode is CanMode.CLASSIC
 
 
@@ -34,6 +37,43 @@ def test_evt2_is_default_layout() -> None:
     assert config.nodes_for_bus("can1")[0].logic_id == 15
     assert config.nodes_for_bus("can2")[0].logic_id == 23
     assert config.interfaces["can5"].role == "ota"
+
+
+def test_factory_names_match_the_production_naming_table() -> None:
+    expected = [
+        "14mini N2",
+        "14mini N1",
+        "32 L1",
+        "32 L2",
+        "32 L3",
+        "32 L4",
+        "20 LA1",
+        "20 LA2",
+        "17 LA3",
+        "17 LA4",
+        "14 LA5",
+        "14mini LA6",
+        "14mini LA7",
+        "14mini LA8",
+        "20 RA1",
+        "20 RA2",
+        "17 RA3",
+        "17 RA4",
+        "14 RA5",
+        "14mini RA6",
+        "14mini RA7",
+        "14mini RA8",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ]
+    for variant in ("EVT1", "EVT2"):
+        assert [node.factory_name for node in load_builtin_evt(variant).nodes] == expected
 
 
 def test_agent_config_is_generated_from_evt_without_mandatory_limits() -> None:

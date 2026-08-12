@@ -33,6 +33,9 @@ if (-not $SkipTests) {
     & $pythonExe @pythonPrefix -m pytest -q
 }
 & $pythonExe @pythonPrefix -m PyInstaller --noconfirm --clean packaging\d7_factory_studio.spec
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller build failed with exit code $LASTEXITCODE"
+}
 
 $exePath = Join-Path $projectRoot "dist\D7-Factory-Studio.exe"
 if (-not (Test-Path -LiteralPath $exePath)) {

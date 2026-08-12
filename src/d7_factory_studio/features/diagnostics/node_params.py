@@ -7,6 +7,19 @@ from pathlib import PurePosixPath
 from d7_factory_studio.core.evt import EvtConfig, MotorNodeConfig
 from d7_factory_studio.core.ports import RemoteCommandRequest
 
+DEFAULT_NODE_PARAMETER_BINARY = "/opt/actuator_sdk/jihua_calib_param_factory"
+DEFAULT_NODE_PARAMETER_CONFIG = "/opt/actuator_sdk/config/calibration_info.yaml"
+
+
+def validate_remote_absolute_path(path: str, label: str) -> str:
+    value = path.strip()
+    remote_path = PurePosixPath(value)
+    if any(character in value for character in ("\n", "\r", "\0")):
+        raise ValueError(f"{label}包含非法字符")
+    if not remote_path.is_absolute() or not remote_path.name:
+        raise ValueError(f"{label}必须是远端绝对路径")
+    return str(remote_path)
+
 
 @dataclass(frozen=True, slots=True)
 class NodeParameterOperation:
@@ -20,11 +33,13 @@ def operation_request(
 ) -> RemoteCommandRequest:
     if operation not in {"read", "write"}:
         raise ValueError(f"不支持的节点参数操作: {operation}")
-    binary = PurePosixPath(binary_path)
-    if not binary.is_absolute() or not binary.name:
-        raise ValueError("参数工具必须是远端绝对路径")
+    binary = PurePosixPath(validate_remote_absolute_path(binary_path, "参数工具"))
     flag = "-r" if operation == "read" else "-w"
+    binary_text = str(binary)
+    unavailable_message = shlex.quote(f"参数工具不存在或不可执行: {binary_text}")
     command = (
+        f"test -x {shlex.quote(binary_text)} || "
+        f"{{ echo {unavailable_message} >&2; exit 126; }}; "
         f"cd {shlex.quote(str(binary.parent))} && "
         f"timeout --signal=TERM --kill-after=2s {int(timeout_s)}s "
         f"{shlex.quote('./' + binary.name)} {flag} {node.logic_id}"
@@ -39,7 +54,7 @@ def operation_request(
 
 def build_node_plan(
     evt: EvtConfig,
-    binary_path: str,
+    binary_path: str = DEFAULT_NODE_PARAMETER_BINARY,
     *,
     buses: tuple[str, ...] = (),
     logic_ids: tuple[int, ...] = (),

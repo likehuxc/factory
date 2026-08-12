@@ -113,7 +113,7 @@ def test_agent_can_transport_filters_bus_and_round_trips_frame() -> None:
     client = FakeEventAgent()
     transport = AgentCanTransport(client, "can5")
     transport.open(0, CanMode.CLASSIC)
-    assert client.calls[-1][0] == "can.subscribe"
+    assert client.calls[-1] == ("can.subscribe", None, {"bus": "can5"})
     client.listeners[0]({"v": 1, "type": "can.frame", "bus": "can2", "id": 1, "is_fd": False, "data": [1]})
     client.listeners[0](
         {"v": 1, "type": "can.frame", "bus": "can5", "id": 0x18, "is_fd": False, "data": [1, 2]}
@@ -125,7 +125,43 @@ def test_agent_can_transport_filters_bus_and_round_trips_frame() -> None:
     assert client.calls[-1] == (
         "can.send",
         None,
-        {"unsafe": True, "bus": "can5", "id": 0x18, "is_fd": False, "data": [3]},
+        {
+            "unsafe": True,
+            "bus": "can5",
+            "id": 0x18,
+            "is_fd": False,
+            "bitrate_switch": False,
+            "data": [3],
+        },
+    )
+    transport.send_many(
+        (
+            CanFrame(0x18, b"\x04", is_fd=False),
+            CanFrame(0x19, b"\x05", is_fd=False),
+        )
+    )
+    assert client.calls[-1] == (
+        "can.send_batch",
+        None,
+        {
+            "unsafe": True,
+            "frames": [
+                {
+                    "bus": "can5",
+                    "id": 0x18,
+                    "is_fd": False,
+                    "bitrate_switch": False,
+                    "data": [4],
+                },
+                {
+                    "bus": "can5",
+                    "id": 0x19,
+                    "is_fd": False,
+                    "bitrate_switch": False,
+                    "data": [5],
+                },
+            ],
+        },
     )
     transport.close()
     assert client.listeners == []

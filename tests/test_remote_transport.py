@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import io
+import os
+import shutil
 import stat
+import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from d7_factory_studio.core.ports import CancellationToken, RemoteCommandRequest, RemoteFileInfo
 from d7_factory_studio.features.diagnostics.transport import (
@@ -119,9 +125,19 @@ def connected_session(client: FakeClient) -> ParamikoRemoteSession:
 
 def test_remote_wrapper_uses_setsid_and_process_group_marker() -> None:
     command = _wrapped_command(("sh", "-lc", "echo ok"))
-    assert command.startswith("setsid sh -c")
+    assert command.startswith("setsid --wait sh -c")
     assert "__D7_PGID__" in command
     assert "kill -TERM -- -$$" in command
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("setsid") is None, reason="requires setsid")
+def test_remote_wrapper_waits_for_child_process() -> None:
+    command = _wrapped_command(("sh", "-c", "sleep 0.2; echo done"))
+    started = time.monotonic()
+    result = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
+    assert time.monotonic() - started >= 0.18
+    assert result.returncode == 0
+    assert "done" in result.stdout
 
 
 def test_execute_streams_stdout_and_stderr_and_hides_marker() -> None:

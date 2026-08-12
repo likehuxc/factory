@@ -79,6 +79,7 @@ class MotorNodeConfig:
     dev_id: int
     group: str
     bus: str
+    factory_name: str = ""
     direction: int = 1
     position_min_rad: float | None = None
     position_max_rad: float | None = None
@@ -188,6 +189,7 @@ def load_evt_config(path: str | Path) -> EvtConfig:
                 dev_id=dev_id,
                 group=str(item["group"]),
                 bus=bus,
+                factory_name=str(item.get("factory_name", "")),
                 direction=_as_int(item.get("direction", 1), "direction"),
                 position_min_rad=float(item["position_min_rad"]) if "position_min_rad" in item else None,
                 position_max_rad=float(item["position_max_rad"]) if "position_max_rad" in item else None,

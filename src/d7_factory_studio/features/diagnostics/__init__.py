@@ -1,7 +1,7 @@
 """Remote CAN diagnostics driven entirely by :class:`EvtConfig`."""
 
 from .models import DiagnosticProfile, DiagnosticStage, DiagnosticVerdict
-from .service import DiagnosticOptions, DiagnosticService
+from .service import DiagnosticOptions, DiagnosticService, diagnostic_raw_artifacts
 from .transport import ParamikoRemoteSession, SshConnection
 
 __all__ = [
@@ -12,4 +12,5 @@ __all__ = [
     "DiagnosticVerdict",
     "ParamikoRemoteSession",
     "SshConnection",
+    "diagnostic_raw_artifacts",
 ]

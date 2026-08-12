@@ -89,6 +89,8 @@ class OrinAgentClient:
         self._reader: threading.Thread | None = None
         self._heartbeat: threading.Thread | None = None
         self._fatal_error: BaseException | None = None
+        self._session_generation = 0
+        self._launch_args: tuple[str, str, str | None] | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -96,7 +98,12 @@ class OrinAgentClient:
 
     @property
     def is_running(self) -> bool:
-        return bool(self._channel and not self._channel.closed and not self._channel.exit_status_ready())
+        return bool(
+            self._channel
+            and not self._channel.closed
+            and not self._channel.exit_status_ready()
+            and self._fatal_error is None
+        )
 
     def connect(
         self,
@@ -243,6 +250,13 @@ class OrinAgentClient:
         transport = self._require_transport()
         if self.is_running:
             raise RuntimeError("agent 已在运行")
+        previous = self._channel
+        if previous is not None and not previous.closed:
+            previous.close()
+        self._session_generation += 1
+        generation = self._session_generation
+        self._fatal_error = None
+        self._stop.clear()
         channel = transport.open_session(timeout=10.0)
         environment = (
             f"env LD_LIBRARY_PATH={shlex.quote(remote_library_path)} "
@@ -254,15 +268,30 @@ class OrinAgentClient:
         )
         channel.exec_command(command)
         self._channel = channel
-        self._stop.clear()
-        self._reader = threading.Thread(target=self._reader_loop, name="d7-agent-reader", daemon=True)
+        self._reader = threading.Thread(
+            target=self._reader_loop,
+            args=(channel, generation),
+            name="d7-agent-reader",
+            daemon=True,
+        )
         self._reader.start()
         hello = self.request("hello", timeout_s=10.0)
+        self._launch_args = (remote_binary, remote_config, remote_library_path)
         self._heartbeat = threading.Thread(
-            target=self._heartbeat_loop, name="d7-agent-heartbeat", daemon=True
+            target=self._heartbeat_loop,
+            args=(generation,),
+            name="d7-agent-heartbeat",
+            daemon=True,
         )
         self._heartbeat.start()
         return hello
+
+    def restart(self) -> dict[str, Any]:
+        if self._launch_args is None:
+            raise AgentProtocolError("agent 尚未成功启动，无法自动恢复")
+        if not self.is_connected:
+            raise AgentProtocolError("SSH 连接已断开，无法自动恢复 agent")
+        return self.start(*self._launch_args)
 
     def request(
         self,
@@ -326,6 +355,7 @@ class OrinAgentClient:
             self.request("cancel", args={"target_id": request_id}, timeout_s=3.0)
 
     def close(self) -> None:
+        self._session_generation += 1
         channel = self._channel
         if channel is not None and not channel.closed:
             with contextlib.suppress(AgentProtocolError, AgentOperationError, TimeoutError, OSError):
@@ -340,12 +370,10 @@ class OrinAgentClient:
         self._transport = None
         self._fail_pending(AgentProtocolError("agent 会话已关闭"))
 
-    def _reader_loop(self) -> None:
+    def _reader_loop(self, channel: paramiko.Channel, generation: int) -> None:
         decoder = JsonlDecoder()
-        channel = self._channel
-        assert channel is not None
         try:
-            while not self._stop.is_set():
+            while generation == self._session_generation and not self._stop.is_set():
                 if channel.recv_ready():
                     for message in decoder.feed(channel.recv(65536)):
                         self._dispatch(message)
@@ -354,8 +382,9 @@ class OrinAgentClient:
                 else:
                     time.sleep(0.01)
         except BaseException as exc:
-            self._fatal_error = exc
-            self._fail_pending(exc)
+            if generation == self._session_generation:
+                self._fatal_error = exc
+                self._fail_pending(exc)
 
     def _dispatch(self, message: dict[str, Any]) -> None:
         if message.get("type") == "result":
@@ -371,15 +400,21 @@ class OrinAgentClient:
         for listener in tuple(self._event_listeners):
             listener(message)
 
-    def _heartbeat_loop(self) -> None:
-        while not self._stop.wait(0.5):
+    def _heartbeat_loop(self, generation: int) -> None:
+        consecutive_failures = 0
+        while generation == self._session_generation and not self._stop.wait(0.5):
             if not self.is_running:
                 return
             try:
                 self.request("heartbeat", timeout_s=1.0)
+                consecutive_failures = 0
             except (AgentProtocolError, AgentOperationError, TimeoutError, OSError) as exc:
-                self._fatal_error = exc
-                self._fail_pending(exc)
+                consecutive_failures += 1
+                if consecutive_failures < 3:
+                    continue
+                if generation == self._session_generation:
+                    self._fatal_error = exc
+                    self._fail_pending(exc)
                 return
 
     def _fail_pending(self, error: BaseException) -> None:
@@ -422,7 +457,7 @@ class AgentCanTransport(CanTransport):
         self._mode = CanMode(mode)
         self.client.add_event_listener(self._on_event)
         try:
-            self.client.request("can.subscribe")
+            self.client.request("can.subscribe", args={"bus": self.bus})
         except Exception:
             self.client.remove_event_listener(self._on_event)
             raise
@@ -431,7 +466,7 @@ class AgentCanTransport(CanTransport):
     def close(self) -> None:
         if self._open and self.client.is_running:
             with contextlib.suppress(AgentProtocolError, AgentOperationError, TimeoutError):
-                self.client.request("can.unsubscribe", timeout_s=3.0)
+                self.client.request("can.unsubscribe", args={"bus": self.bus}, timeout_s=3.0)
         self.client.remove_event_listener(self._on_event)
         self._open = False
         while not self._frames.empty():
@@ -450,7 +485,33 @@ class AgentCanTransport(CanTransport):
                 "bus": self.bus,
                 "id": frame.arbitration_id,
                 "is_fd": frame.is_fd,
+                "bitrate_switch": frame.bitrate_switch,
                 "data": list(frame.data),
+            },
+        )
+
+    def send_many(self, frames) -> None:  # type: ignore[no-untyped-def]
+        if not self.is_open:
+            raise AgentProtocolError("远程 CAN 尚未打开")
+        pending = tuple(frames)
+        if not pending:
+            return
+        if self._mode is CanMode.CLASSIC and any(frame.is_fd for frame in pending):
+            raise ValueError("Classic CAN 接口不能发送 CAN FD 帧")
+        self.client.request(
+            "can.send_batch",
+            args={
+                "unsafe": True,
+                "frames": [
+                    {
+                        "bus": self.bus,
+                        "id": frame.arbitration_id,
+                        "is_fd": frame.is_fd,
+                        "bitrate_switch": frame.bitrate_switch,
+                        "data": list(frame.data),
+                    }
+                    for frame in pending
+                ],
             },
         )
 

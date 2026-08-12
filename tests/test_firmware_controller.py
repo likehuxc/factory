@@ -15,6 +15,7 @@ from d7_factory_studio.features.firmware.image import FirmwareImage
 from d7_factory_studio.features.firmware.profiles import BATTERY_PROFILE
 from d7_factory_studio.protocols.iap import (
     CMD_GET_RUN_ROLE,
+    CMD_GET_SOFT_VERSION,
     CMD_JUMP_TO_APP,
     CMD_SET_SEGMENT_INFO,
     CMD_VALIDATE_SEGMENT_DATA,
@@ -60,6 +61,8 @@ class FakeIapTransport:
         elif command == CMD_GET_RUN_ROLE:
             role = 0 if self.jumped else 1
             self.replies.append(make_ack(command, self.target, bytes((role, 0, 0, 0xE9))))
+        elif command == CMD_GET_SOFT_VERSION:
+            self.replies.append(make_ack(command, self.target, bytes((1, 12, 3, 0xE9))))
         elif command == CMD_SET_SEGMENT_INFO:
             self.replies.append(make_ack(command, self.target, b"\0\0\0\0"))
         elif command == CMD_VALIDATE_SEGMENT_DATA:
@@ -96,6 +99,17 @@ def test_pre_cancelled_upgrade_sends_nothing() -> None:
     with pytest.raises(OperationCancelled):
         FirmwareUpgradeController(transport, IapProtocol()).upgrade(image, token=token)
     assert transport.sent == []
+
+
+def test_role_and_version_queries_remain_available() -> None:
+    transport = FakeIapTransport()
+    controller = FirmwareUpgradeController(transport)
+    assert controller.query_role() == "BOOT"
+    assert controller.query_software_version() == "1.12.3"
+    assert [frame.data[2] for frame in transport.sent] == [
+        CMD_GET_RUN_ROLE,
+        CMD_GET_SOFT_VERSION,
+    ]
 
 
 def test_profile_controller_carries_battery_upgrade_defaults() -> None:

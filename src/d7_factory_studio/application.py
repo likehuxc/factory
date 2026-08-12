@@ -39,7 +39,7 @@ class ApplicationState(QObject):
         self.online_nodes = 0
         self.fault_message = ""
         self.log(
-            "连接", f"已切换到{'PC 直连' if mode is ConnectionMode.PC_DIRECT else 'Orin 远程'}，安全锁已恢复"
+            "连接", f"通信方式已切换到{'CAN 盒' if mode is ConnectionMode.PC_DIRECT else 'Orin'}"
         )
         self.changed.emit()
         if should_disconnect:
@@ -59,7 +59,7 @@ class ApplicationState(QObject):
         self.safety_locked = True
         self.online_nodes = 0
         self.fault_message = ""
-        self.log("配置", f"已切换到 {config.variant}，连接已断开并恢复安全锁")
+        self.log("配置", f"已切换到 {config.variant}，连接已断开")
         self.changed.emit()
         if should_disconnect:
             self.request("connection.disconnect")
@@ -79,7 +79,7 @@ class ApplicationState(QObject):
         self.safety_locked = True
         self.online_nodes = 0
         self.fault_message = ""
-        self.log("配置", f"{normalized_variant} CAN 映射已应用，连接已断开并恢复安全锁")
+        self.log("配置", f"{normalized_variant} CAN 映射已应用，连接已断开")
         self.changed.emit()
         if should_disconnect:
             self.request("connection.disconnect")
@@ -94,7 +94,7 @@ class ApplicationState(QObject):
         self.link_state = LinkState.DISCONNECTED
         self.online_nodes = 0
         self.safety_locked = True
-        self.log("连接", f"当前接口切换为 {interface.upper()}，连接已断开并恢复安全锁")
+        self.log("连接", f"当前接口切换为 {interface.upper()}，连接已断开")
         self.changed.emit()
         if should_disconnect:
             self.request("connection.disconnect")

@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, Qt
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from d7_factory_studio.application import ApplicationState
-from d7_factory_studio.core.models import LinkState
+from d7_factory_studio.core.models import ConnectionMode, LinkState
 from d7_factory_studio.settings_store import SettingsStore
 from d7_factory_studio.ui.controls import D7DateTimeEdit as QDateTimeEdit
 from d7_factory_studio.ui.controls import D7TableWidget as QTableWidget
@@ -47,6 +48,15 @@ class LogsPage(WorkbenchPage):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 12, 0, 0)
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("选择日志行后可复制（Ctrl+C）"))
+        toolbar.addStretch(1)
+        self.copy_activity_button = QPushButton("复制所选")
+        self.copy_activity_button.setEnabled(False)
+        self.copy_activity_button.setToolTip("复制所选任务日志（Ctrl+C）")
+        self.copy_activity_button.clicked.connect(self._copy_selected_activity)
+        toolbar.addWidget(self.copy_activity_button)
+        layout.addLayout(toolbar)
         self.activity_table = QTableWidget(0, 4)
         self.activity_table.setHorizontalHeaderLabels(["时间", "级别", "来源", "内容"])
         self.activity_table.horizontalHeader().setSectionResizeMode(
@@ -60,6 +70,9 @@ class LogsPage(WorkbenchPage):
         )
         self.activity_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.activity_table.verticalHeader().setVisible(False)
+        self.activity_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.activity_table.itemSelectionChanged.connect(self._update_activity_copy_button)
+        QShortcut(QKeySequence.StandardKey.Copy, self.activity_table, self._copy_selected_activity)
         layout.addWidget(self.activity_table)
         return tab
 
@@ -131,12 +144,35 @@ class LogsPage(WorkbenchPage):
             self.activity_table.setItem(row, column, QTableWidgetItem(value))
         self.activity_table.scrollToBottom()
 
+    def _selected_activity_rows(self) -> list[int]:
+        return sorted({index.row() for index in self.activity_table.selectedIndexes()})
+
+    def _update_activity_copy_button(self) -> None:
+        self.copy_activity_button.setEnabled(bool(self._selected_activity_rows()))
+
+    def _copy_selected_activity(self) -> None:
+        rows = self._selected_activity_rows()
+        if not rows:
+            return
+        headers = [self.activity_table.horizontalHeaderItem(column).text() for column in range(4)]
+        lines = ["\t".join(headers)]
+        for row in rows:
+            lines.append(
+                "\t".join(
+                    self.activity_table.item(row, column).text()
+                    if self.activity_table.item(row, column) is not None
+                    else ""
+                    for column in range(4)
+                )
+            )
+        QApplication.clipboard().setText("\n".join(lines))
+
     def _refresh_logs(self) -> None:
         if (
-            self.state.connection_mode.value != "orin_remote"
+            self.state.connection_mode is not ConnectionMode.ORIN_REMOTE
             or self.state.link_state is not LinkState.CONNECTED
         ):
-            QMessageBox.warning(self, "Orin 未连接", "切换到 Orin 远程并连接后才能查询设备日志。")
+            QMessageBox.warning(self, "Orin 未连接", "请先在当前页面连接 Orin，再查询设备日志。")
             return
         self.state.request(
             "device_logs.list",

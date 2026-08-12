@@ -1,13 +1,27 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+import threading
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
 from d7_factory_studio.core.evt import EvtConfig
-from d7_factory_studio.core.ports import CancellationToken, RemoteSession
+from d7_factory_studio.core.ports import (
+    CancellationToken,
+    RemoteCommandRequest,
+    RemoteCommandResult,
+    RemoteSession,
+)
 
-from .broadcast import broadcast_request, summarize_responses
+from .broadcast import (
+    broadcast_request,
+    live_response_event,
+    parse_broadcast_frame,
+    responding_node,
+    summarize_responses,
+)
 from .commands import (
     clear_dmesg_request,
     configure_requests,
@@ -20,6 +34,50 @@ from .models import DiagnosticProfile, StageEvidence
 from .node_params import build_node_plan
 from .parsers import dmesg_suffix, evaluate, extract_error_lines, parse_can_interfaces, parse_link_snapshot
 from .profiles import build_profile
+
+ProgressCallback = Callable[[int, str], None]
+
+
+def _artifact_component(value: object) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._") or "unknown"
+
+
+def diagnostic_raw_artifacts(result: Mapping[str, object]) -> dict[str, str]:
+    """Split structured diagnostic evidence into report-bundle raw files."""
+    artifacts: dict[str, str] = {}
+    stages = result.get("stages", [])
+    if isinstance(stages, list):
+        for index, item in enumerate(stages, 1):
+            if not isinstance(item, dict):
+                continue
+            stage = item.get("stage", {})
+            stage_name = stage.get("name", "stage") if isinstance(stage, dict) else "stage"
+            prefix = (
+                f"stages/{index:02d}-{_artifact_component(item.get('interface', 'can'))}-"
+                f"{_artifact_component(stage_name)}"
+            )
+            for key in (
+                "dmesg_before",
+                "dmesg_after",
+                "dmesg_new",
+                "candump",
+                "generator_stdout",
+                "generator_stderr",
+            ):
+                artifacts[f"{prefix}/{key}.log"] = str(item.get(key, ""))
+            for key in ("before", "after"):
+                snapshot = item.get(key, {})
+                raw = snapshot.get("raw", "") if isinstance(snapshot, dict) else ""
+                artifacts[f"{prefix}/ip_{key}.log"] = str(raw)
+    commands = result.get("commands", [])
+    if isinstance(commands, list):
+        for index, item in enumerate(commands, 1):
+            if not isinstance(item, dict):
+                continue
+            prefix = f"commands/{index:02d}-{_artifact_component(item.get('label', 'command'))}"
+            artifacts[f"{prefix}.stdout.log"] = str(item.get("stdout", ""))
+            artifacts[f"{prefix}.stderr.log"] = str(item.get("stderr", ""))
+    return artifacts
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +113,9 @@ class DiagnosticService:
         options: DiagnosticOptions,
         token: CancellationToken,
         on_output: Callable[[str, bool], None] | None = None,
+        on_progress: ProgressCallback | None = None,
+        *,
+        sudo_password: str | None = None,
     ) -> dict[str, object]:
         unknown = set(interfaces) - set(self.evt.interfaces)
         if unknown:
@@ -66,33 +127,8 @@ class DiagnosticService:
         failures: list[str] = []
         evidence: list[StageEvidence] = []
 
-        for request in environment_requests():
-            self._execute_recorded(request, token, command_log, failures, on_output)
-        if options.clear_dmesg:
-            from d7_factory_studio.core.ports import RemoteCommandRequest
-
-            self._execute_recorded(
-                RemoteCommandRequest(
-                    ("sudo", "dmesg", "--time-format", "iso"),
-                    timeout_s=30,
-                    evidence_label="dmesg-before-high-risk-clear",
-                ),
-                token,
-                command_log,
-                failures,
-                on_output,
-            )
-            self._execute_recorded(
-                clear_dmesg_request(high_risk_confirmed=True), token, command_log, failures, on_output
-            )
-        for interface in interfaces:
-            config = self.evt.interfaces[interface]
-            if options.setup_can_script and not options.setup_each_stage:
-                self._run_setup(options.setup_can_script, token, command_log, failures, on_output)
-            if options.configure_interface:
-                for request in configure_requests(config):
-                    self._execute_recorded(request, token, command_log, failures, on_output)
-            stages = build_profile(
+        plans = {
+            interface: build_profile(
                 self.evt,
                 interface,
                 options.profile,
@@ -102,18 +138,175 @@ class DiagnosticService:
                 payload_length=options.payload_length,
                 random_frames=options.random_frames,
             )
-            for stage in stages:
+            for interface in interfaces
+        }
+        total_stage_seconds = max(
+            1,
+            sum(stage.duration_s for stages in plans.values() for stage in stages),
+        )
+        planned_stage_count = sum(len(stages) for stages in plans.values())
+        completed_stage_seconds = 0
+
+        if options.clear_dmesg:
+            self._progress(on_progress, 1, "正在清空内核日志")
+            clear_result = self._execute_recorded(
+                clear_dmesg_request(
+                    high_risk_confirmed=True, sudo_password=sudo_password
+                ),
+                token,
+                command_log,
+                failures,
+                on_output,
+            )
+            if clear_result.returncode != 0:
+                self._progress(on_progress, 100, "dmesg -C 执行失败，链路测试已停止")
+                return self._result(
+                    interfaces,
+                    options,
+                    started,
+                    evidence,
+                    failures,
+                    command_log,
+                    planned_stage_count=planned_stage_count,
+                )
+        self._progress(on_progress, 2 if options.clear_dmesg else 1, "正在检查 Orin 诊断环境")
+        for request in environment_requests():
+            self._execute_recorded(request, token, command_log, failures, on_output)
+        if any(item["label"] == "required-tools" and item["returncode"] for item in command_log):
+            self._progress(on_progress, 100, "诊断环境缺少必要工具")
+            return self._result(
+                interfaces,
+                options,
+                started,
+                evidence,
+                failures,
+                command_log,
+                planned_stage_count=planned_stage_count,
+            )
+        if options.setup_can_script and not options.setup_each_stage:
+            self._progress(on_progress, 3, "正在执行 setup_can.sh")
+            setup_result = self._run_setup(
+                options.setup_can_script,
+                token,
+                command_log,
+                failures,
+                on_output,
+                sudo_password,
+            )
+            if setup_result.returncode != 0:
+                failures.append("setup_can 失败，已停止链路测试")
+                self._progress(on_progress, 100, "setup_can.sh 执行失败，链路测试已停止")
+                return self._result(
+                    interfaces,
+                    options,
+                    started,
+                    evidence,
+                    failures,
+                    command_log,
+                    planned_stage_count=planned_stage_count,
+                )
+        for interface in interfaces:
+            config = self.evt.interfaces[interface]
+            self._progress(
+                on_progress,
+                5 + round(90 * completed_stage_seconds / total_stage_seconds),
+                f"{interface.upper()}：正在准备接口",
+            )
+            if options.configure_interface and not options.setup_each_stage:
+                configuration_failed = False
+                for request in configure_requests(config, sudo_password):
+                    result = self._execute_recorded(
+                        request, token, command_log, failures, on_output
+                    )
+                    configuration_failed = configuration_failed or result.returncode != 0
+                if configuration_failed:
+                    failures.append(f"{interface}: CAN 接口配置失败，已跳过流量测试")
+                    completed_stage_seconds += sum(stage.duration_s for stage in plans[interface])
+                    continue
+            for stage_index, stage in enumerate(plans[interface]):
                 token.raise_if_cancelled()
                 if options.setup_can_script and options.setup_each_stage:
-                    self._run_setup(options.setup_can_script, token, command_log, failures, on_output)
+                    setup_result = self._run_setup(
+                        options.setup_can_script,
+                        token,
+                        command_log,
+                        failures,
+                        on_output,
+                        sudo_password,
+                    )
+                    if setup_result.returncode != 0:
+                        failures.append(
+                            f"{interface}/{stage.name}: setup_can 失败，已跳过剩余阶段"
+                        )
+                        completed_stage_seconds += sum(
+                            item.duration_s for item in plans[interface][stage_index:]
+                        )
+                        break
+                    if options.configure_interface:
+                        configuration_failed = False
+                        for request in configure_requests(config, sudo_password):
+                            config_result = self._execute_recorded(
+                                request, token, command_log, failures, on_output
+                            )
+                            configuration_failed = (
+                                configuration_failed or config_result.returncode != 0
+                            )
+                        if configuration_failed:
+                            failures.append(
+                                f"{interface}/{stage.name}: setup_can 后 CAN 接口配置失败，"
+                                "已跳过剩余阶段"
+                            )
+                            completed_stage_seconds += sum(
+                                item.duration_s for item in plans[interface][stage_index:]
+                            )
+                            break
                 request = stage_request(self.evt, config, stage)
-                result = self.session.execute(request, token, on_output)
+                result = self._execute_stage(
+                    request,
+                    token,
+                    on_output,
+                    on_progress,
+                    interface,
+                    stage.name,
+                    completed_stage_seconds,
+                    stage.duration_s,
+                    total_stage_seconds,
+                )
                 command_log.append(self._command_dict(stage.name, result, request.argv))
                 sections, generator_rc = parse_stage_sections(result.stdout)
+                if result.returncode != 0:
+                    failures.append(
+                        f"{interface}/{stage.name}: 远程阶段命令失败 (RC={result.returncode})"
+                    )
+                required_sections = {
+                    "ip_before",
+                    "ip_after",
+                    "dmesg_before",
+                    "dmesg_after",
+                    "candump",
+                    "generator_out",
+                    "generator_err",
+                }
+                missing_sections = sorted(required_sections - sections.keys())
+                if missing_sections:
+                    failures.append(
+                        f"{interface}/{stage.name}: 未收到完整阶段证据 "
+                        f"({', '.join(missing_sections)})"
+                    )
                 before_dmesg, after_dmesg = sections.get("dmesg_before", ""), sections.get("dmesg_after", "")
                 new_dmesg = dmesg_suffix(before_dmesg, after_dmesg)
                 candump = sections.get("candump", "")
                 errors = extract_error_lines(new_dmesg, interface) + extract_error_lines(candump, interface)
+                self._emit_stage_summary(
+                    on_output,
+                    interface,
+                    stage.name,
+                    generator_rc,
+                    candump,
+                    errors,
+                    result,
+                    missing_sections,
+                )
                 evidence.append(
                     StageEvidence(
                         interface=interface,
@@ -132,7 +325,39 @@ class DiagnosticService:
                         cancelled=result.cancelled,
                     )
                 )
+                completed_stage_seconds += stage.duration_s
+        result = self._result(
+            interfaces,
+            options,
+            started,
+            evidence,
+            failures,
+            command_log,
+            planned_stage_count=planned_stage_count,
+        )
+        verdict = str(result["evaluation"]["verdict"])
+        self._progress(on_progress, 100, f"链路测试完成：{verdict}")
+        return result
+
+    def _result(
+        self,
+        interfaces,
+        options: DiagnosticOptions,
+        started: str,
+        evidence: list[StageEvidence],
+        failures: list[str],
+        command_log: list[dict[str, object]],
+        *,
+        planned_stage_count: int,
+    ) -> dict[str, object]:
         assessment = evaluate(tuple(evidence), tuple(failures))
+        executed_stage_count = len(evidence)
+        if executed_stage_count == planned_stage_count:
+            execution_status = "complete"
+        elif executed_stage_count:
+            execution_status = "partial"
+        else:
+            execution_status = "not_started"
         return {
             "schema_version": 1,
             "kind": "can_diagnostic",
@@ -142,6 +367,11 @@ class DiagnosticService:
             "interfaces": list(interfaces),
             "options": asdict(options),
             "evaluation": assessment.to_dict(),
+            "execution": {
+                "status": execution_status,
+                "planned_stage_count": planned_stage_count,
+                "executed_stage_count": executed_stage_count,
+            },
             "stages": [item.to_dict() for item in evidence],
             "commands": command_log,
         }
@@ -220,12 +450,60 @@ class DiagnosticService:
         on_output: Callable[[str, bool], None] | None = None,
     ) -> dict[str, object]:
         request = broadcast_request(self.evt, interface, duration_s, payload_hex)
-        result = self.session.execute(request, token, on_output)
+        line_buffer = ""
+        live_counts: dict[int, int] = {}
+
+        def emit_line(line: str) -> None:
+            if on_output is None:
+                return
+            parsed = parse_broadcast_frame(line)
+            if parsed is None:
+                if line:
+                    on_output(line + "\n", False)
+                return
+            if parsed[0] != interface:
+                return
+            node = responding_node(self.evt, interface, parsed[1])
+            if node is None:
+                return
+            count = live_counts.get(node.logic_id, 0) + 1
+            live_counts[node.logic_id] = count
+            on_output(live_response_event(interface, node.logic_id, count, parsed[1]), False)
+
+        def emit_filtered(chunk: str, is_error: bool) -> None:
+            nonlocal line_buffer
+            if on_output is None:
+                return
+            if is_error:
+                on_output(chunk, True)
+                return
+            line_buffer += chunk.replace("\r", "")
+            while "\n" in line_buffer:
+                line, line_buffer = line_buffer.split("\n", 1)
+                emit_line(line)
+
+        result = self.session.execute(request, token, emit_filtered if on_output else None)
+        if line_buffer:
+            emit_line(line_buffer)
         summary = summarize_responses(self.evt, interface, tuple(result.stdout.splitlines()))
         send_errors = 0
         for line in result.stdout.splitlines():
             if line.startswith("__SEND_ERROR_COUNT__:"):
                 send_errors = int(line.rsplit(":", 1)[-1] or 0)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or f"RC={result.returncode}"
+            raise RuntimeError(f"{interface} 广播命令执行失败: {detail}")
+        if send_errors:
+            first_error = next(
+                (
+                    line.split(":", 1)[1].strip()
+                    for line in result.stdout.splitlines()
+                    if line.startswith("__SEND_ERROR__:")
+                ),
+                "",
+            )
+            detail = f"：{first_error}" if first_error else ""
+            raise RuntimeError(f"{interface} 广播发送失败 {send_errors} 次{detail}")
         return {
             "schema_version": 1,
             "kind": "broadcast",
@@ -238,34 +516,172 @@ class DiagnosticService:
             "cancelled": result.cancelled,
         }
 
-    def _run_setup(self, script: str, token: CancellationToken, command_log, failures, on_output) -> None:
+    def prepare_motor_can(
+        self,
+        token: CancellationToken,
+        *,
+        on_output: Callable[[str, bool], None] | None = None,
+        sudo_password: str | None = None,
+    ) -> RemoteCommandResult:
+        result = self._run_setup(
+            "~/setup_can.sh",
+            token,
+            [],
+            [],
+            on_output,
+            sudo_password,
+        )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip() or f"RC={result.returncode}"
+            raise RuntimeError(f"setup_can.sh 执行失败: {detail}")
+        return result
+
+    def _run_setup(
+        self,
+        script: str,
+        token: CancellationToken,
+        command_log,
+        failures,
+        on_output,
+        sudo_password: str | None,
+    ) -> RemoteCommandResult:
         if not script.startswith("/") and not script.startswith("~/"):
             raise ValueError("setup_can 脚本必须是绝对路径或 ~/ 路径")
         if any(character in script for character in ("\n", "\r", "\0")):
             raise ValueError("setup_can 脚本路径包含非法字符")
-        from d7_factory_studio.core.ports import RemoteCommandRequest
+        from pathlib import PurePosixPath
 
-        argv = ("sudo", script)
+        sudo = 'sudo -S -p "" --' if sudo_password is not None else "sudo --"
         if script.startswith("~/"):
-            from pathlib import PurePosixPath
-
             relative = PurePosixPath(script[2:])
             if any(part in {"", ".", ".."} for part in relative.parts):
                 raise ValueError("setup_can 用户目录路径无效")
-            argv = ("sh", "-lc", 'sudo -- "$HOME/$1"', "d7-setup", str(relative))
-        self._execute_recorded(
-            RemoteCommandRequest(argv, timeout_s=120, stream_output=True, evidence_label="setup-can"),
+            parent = "" if str(relative.parent) == "." else str(relative.parent)
+            argv = (
+                "sh",
+                "-lc",
+                f'cd -- "$HOME/$1" && {sudo} "./$2"',
+                "d7-setup",
+                parent,
+                relative.name,
+            )
+        else:
+            absolute = PurePosixPath(script)
+            argv = (
+                "sh",
+                "-lc",
+                f'cd -- "$1" && {sudo} "./$2"',
+                "d7-setup",
+                str(absolute.parent),
+                absolute.name,
+            )
+        return self._execute_recorded(
+            RemoteCommandRequest(
+                argv,
+                timeout_s=120,
+                stream_output=True,
+                stdin_secret=sudo_password,
+                evidence_label="setup-can",
+            ),
             token,
             command_log,
             failures,
             on_output,
         )
 
-    def _execute_recorded(self, request, token, command_log, failures, on_output) -> None:
+    def _execute_recorded(
+        self, request, token, command_log, failures, on_output
+    ) -> RemoteCommandResult:
+        if on_output is not None:
+            on_output(f"执行 {request.evidence_label}\n", False)
         result = self.session.execute(request, token, on_output)
         command_log.append(self._command_dict(request.evidence_label, result, request.argv))
         if result.returncode:
             failures.append(f"命令 {request.evidence_label} 失败 (RC={result.returncode})")
+        if on_output is not None:
+            on_output(
+                f"{request.evidence_label} 结束：RC={result.returncode}，"
+                f"耗时 {result.duration_s:.1f}s\n",
+                result.returncode != 0,
+            )
+        return result
+
+    def _execute_stage(
+        self,
+        request,
+        token,
+        on_output,
+        on_progress,
+        interface: str,
+        stage_name: str,
+        completed_seconds: int,
+        stage_seconds: int,
+        total_seconds: int,
+    ) -> RemoteCommandResult:
+        finished = threading.Event()
+
+        def heartbeat() -> None:
+            started = time.monotonic()
+            while not finished.wait(1.0):
+                elapsed = min(stage_seconds, int(time.monotonic() - started))
+                percent = 5 + round(
+                    90 * (completed_seconds + elapsed) / max(1, total_seconds)
+                )
+                self._progress(
+                    on_progress,
+                    percent,
+                    f"{interface.upper()} · {stage_name} · {elapsed}/{stage_seconds}s",
+                )
+
+        self._progress(
+            on_progress,
+            5 + round(90 * completed_seconds / max(1, total_seconds)),
+            f"{interface.upper()} · {stage_name} 开始",
+        )
+        thread = threading.Thread(target=heartbeat, name="d7-diagnostic-progress", daemon=True)
+        thread.start()
+        try:
+            # The command stdout contains complete candump evidence. Keep it in
+            # the result/report, but never stream raw frames into the UI.
+            return self.session.execute(request, token, None)
+        finally:
+            finished.set()
+            thread.join(timeout=0.2)
+
+    @staticmethod
+    def _emit_stage_summary(
+        callback: Callable[[str, bool], None] | None,
+        interface: str,
+        stage_name: str,
+        generator_rc: int,
+        candump: str,
+        errors: tuple[str, ...],
+        result: RemoteCommandResult,
+        missing_sections: list[str],
+    ) -> None:
+        if callback is None:
+            return
+        frame_count = sum(1 for line in candump.splitlines() if line.strip())
+        failed = bool(result.returncode or generator_rc not in {0, 124} or errors or missing_sections)
+        callback(
+            f"{interface.upper()} · {stage_name} 完成："
+            f"生成器 RC={generator_rc}，采集 {frame_count} 帧，错误 {len(errors)} 条",
+            failed,
+        )
+        if result.returncode:
+            callback(f"{interface.upper()} · {stage_name} 远端命令失败 (RC={result.returncode})", True)
+        if missing_sections:
+            callback(
+                f"{interface.upper()} · {stage_name} 缺少证据段：{', '.join(missing_sections)}",
+                True,
+            )
+        for line in dict.fromkeys(errors):
+            callback(f"{interface.upper()} · {stage_name} · {line}", True)
+
+    @staticmethod
+    def _progress(callback: ProgressCallback | None, value: int, message: str) -> None:
+        if callback is not None:
+            callback(max(0, min(100, int(value))), message)
 
     @staticmethod
     def _command_dict(label, result, argv=()) -> dict[str, object]:

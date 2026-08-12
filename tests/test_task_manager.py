@@ -36,3 +36,29 @@ def test_task_manager_cancel_marks_token() -> None:
     assert manager.cancel("task") is True
     assert token.is_cancelled is True
     assert manager.cancel("missing") is False
+
+
+def test_failed_task_can_be_retried_from_failure_handler() -> None:
+    app = create_application([])
+    manager = TaskManager()
+    loop = QEventLoop()
+    results: list[object] = []
+
+    def retry(task_id: str, _error: str, _traceback: str) -> None:
+        assert not manager.is_running(task_id)
+        manager.start(task_id, lambda _token, _report: "retried")
+
+    manager.failed.connect(retry)
+    manager.succeeded.connect(lambda _task, result: results.append(result))
+    manager.finished.connect(lambda _task: loop.quit() if results else None)
+
+    def fail(_token: CancellationToken, _report) -> None:  # type: ignore[no-untyped-def]
+        raise RuntimeError("open failed")
+
+    manager.start("serial485.connection", fail)
+    QTimer.singleShot(2000, loop.quit)
+    loop.exec()
+    app.processEvents()
+
+    assert results == ["retried"]
+    assert not manager.is_running("serial485.connection")

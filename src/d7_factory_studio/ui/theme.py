@@ -40,6 +40,19 @@ def stylesheet() -> str:
     QWidget#PrimarySidebar {{ background: {c["sidebar"]}; }}
     QWidget#SecondarySidebar {{ background: {c["surface"]}; border-right: 1px solid {c["line"]}; }}
     QWidget#TopRail {{ background: {c["surface"]}; border-bottom: 1px solid {c["line"]}; }}
+    QWidget#TopRail QLabel#RailLabel {{ color: {c["ink"]}; font-size: 15px; font-weight: 700; }}
+    QWidget#TopRail QLabel#StatusText {{ color: {c["muted"]}; font-size: 15px; font-weight: 700; }}
+    QWidget#TopRail QLineEdit,
+    QWidget#TopRail QComboBox {{
+        min-height: 40px; max-height: 40px; padding: 0 6px; border-radius: 6px;
+        font-size: 15px;
+    }}
+    QWidget#TopRail QPushButton {{
+        min-height: 40px; max-height: 40px; padding: 0 12px; border-radius: 6px;
+        font-size: 15px;
+    }}
+    QWidget#TopRail QComboBox::drop-down {{ width: 28px; }}
+    QWidget#TopRail QFrame#RailDivider {{ color: {c["line"]}; border: none; }}
     QLabel#BrandCaption {{ color: #A9B8CC; font-size: 13px; font-weight: 700; }}
     QLabel#PageTitle {{ font-size: 28px; font-weight: 700; }}
     QLabel#PageCaption {{ color: {c["muted"]}; font-size: 16px; }}
@@ -70,6 +83,7 @@ def stylesheet() -> str:
         color: {c["primary"]}; border: 2px solid {c["primary"]}; background: {c["primary_soft"]};
         font-weight: 700;
     }}
+    QPushButton[choice="true"][compact="true"] {{ padding: 0 10px; }}
     QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {{
         min-height: 42px; padding: 0 11px; border: 1px solid {c["line"]};
         border-radius: 9px; background: {c["surface"]}; selection-background-color: {c["primary"]};

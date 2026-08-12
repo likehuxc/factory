@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFocusEvent, QMouseEvent, QPalette, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -44,10 +44,27 @@ class D7ComboBox(_WheelAfterFocusMixin, QComboBox):
 class _D7SpinMixin(_WheelAfterFocusMixin):
     def _configure_spinbox(self) -> None:
         self._configure_wheel_focus()
+        self._select_all_on_next_editor_click = True
         self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.PlusMinus)
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.ButtonText, QColor("#246BFD"))
         self.setPalette(palette)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        select_value = self._select_all_on_next_editor_click and self.lineEdit().geometry().contains(
+            event.position().toPoint()
+        )
+        if select_value:
+            self._select_all_on_next_editor_click = False
+        super().mousePressEvent(event)
+        if select_value:
+            # Run after Qt positions the cursor so the first typed value replaces
+            # the existing number instead of producing an invalid intermediate value.
+            QTimer.singleShot(0, self.selectAll)
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        self._select_all_on_next_editor_click = True
+        super().focusOutEvent(event)
 
 
 class D7SpinBox(_D7SpinMixin, QSpinBox):

@@ -4,10 +4,18 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from d7_factory_studio.protocols.serial485 import Aa55Frame, Aa55StreamDecoder
+from d7_factory_studio.protocols.serial485 import (
+    Aa55Frame,
+    Aa55StreamDecoder,
+    ParameterReadItem,
+    ParameterSpec,
+    build_0d_read_multi,
+    parse_0d_response,
+)
 
 
 class Serial485Error(RuntimeError):
@@ -73,8 +81,25 @@ class Serial485Service:
                 write_timeout=self.config.write_timeout_s,
                 **kwargs,
             )
+            # ServoStudio clears both directions and gives the converter/motor
+            # 500 ms to settle before issuing the first protocol request.
+            reset_input = getattr(self._serial, "reset_input_buffer", None)
+            if callable(reset_input):
+                reset_input()
+            reset_output = getattr(self._serial, "reset_output_buffer", None)
+            if callable(reset_output):
+                reset_output()
+            self._decoder.reset()
+            self._pending.clear()
+            time.sleep(0.5)
         except Exception as exc:
+            serial_port = self._serial
+            if serial_port is not None:
+                with suppress(Exception):
+                    serial_port.close()
             self._serial = None
+            self._decoder.reset()
+            self._pending.clear()
             raise Serial485Error(f"打开串口 {self.config.port} 失败: {exc}") from exc
 
     def close(self) -> None:
@@ -112,8 +137,11 @@ class Serial485Service:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
-                serial_port.timeout = max(0.01, min(0.1, remaining))
                 try:
+                    # Do not reconfigure the Windows COM timeout after TX.  On
+                    # the production USB-RS485 adapter that SetCommTimeouts
+                    # call races the motor's ~3 ms reply and drops the frame.
+                    # Keep the timeout chosen when the port was opened.
                     chunk = serial_port.read(max(1, int(getattr(serial_port, "in_waiting", 0)) or 1))
                 except Exception as exc:
                     raise Serial485Error(f"串口接收失败: {exc}") from exc
@@ -125,9 +153,59 @@ class Serial485Service:
                     return self._pending.popleft()
 
     def echo(self, request: bytes, *, timeout_s: float = 0.5) -> bool:
-        self.write(request)
-        response = self.read_frame(timeout_s)
-        return response is not None and response.raw == request
+        response = self.transact(
+            request,
+            timeout_s=timeout_s,
+            matches=lambda frame: frame.raw == request,
+        )
+        return response is not None
+
+    def read_parameters(
+        self,
+        station: int,
+        parameters: tuple[ParameterSpec, ...] | list[ParameterSpec],
+        *,
+        timeout_s: float = 0.5,
+    ) -> tuple[ParameterReadItem, ...]:
+        specs = tuple(parameters)
+        request = build_0d_read_multi(station=station, parameters=specs)
+        response = self.transact(
+            request,
+            timeout_s=timeout_s,
+            matches=lambda frame: frame.station == station and frame.function in (0x0D, 0x8D),
+        )
+        if response is None:
+            raise Serial485Error(
+                f"parameter-read timeout at station 0x{station:02X} after {timeout_s:.3f}s"
+            )
+        return parse_0d_response(response, expected=specs)
+
+    def transact(
+        self,
+        request: bytes,
+        *,
+        timeout_s: float,
+        matches: Callable[[Aa55Frame], bool],
+    ) -> Aa55Frame | None:
+        deadline = time.monotonic() + max(timeout_s, 0)
+        deferred: list[Aa55Frame] = []
+        with self._lock:
+            previously_pending = list(self._pending)
+            self._pending.clear()
+            try:
+                self.write(request)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None
+                    frame = self.read_frame(remaining)
+                    if frame is None:
+                        return None
+                    if matches(frame):
+                        return frame
+                    deferred.append(frame)
+            finally:
+                self._pending.extendleft(reversed(previously_pending + deferred))
 
     def _require_open(self) -> Any:
         if not self.is_open:

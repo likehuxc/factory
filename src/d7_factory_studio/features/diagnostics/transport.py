@@ -42,7 +42,10 @@ def _wrapped_command(argv: tuple[str, ...]) -> str:
 
     supervisor = "echo __D7_PGID__:$$; trap 'trap - TERM INT; kill -TERM -- -$$ 2>/dev/null' TERM INT; \"$@\""
     return (
-        "setsid sh -c " + shlex.quote(supervisor) + " d7-remote " + " ".join(shlex.quote(arg) for arg in argv)
+        "setsid --wait sh -c "
+        + shlex.quote(supervisor)
+        + " d7-remote "
+        + " ".join(shlex.quote(arg) for arg in argv)
     )
 
 
@@ -160,9 +163,12 @@ class ParamikoRemoteSession(RemoteSession):
                 break
             time.sleep(0.02)
 
-        while not channel.closed and channel.recv_ready():
+        # Paramiko can mark a channel closed while unread bytes are still
+        # buffered. Drain based on readiness so fast commands do not lose
+        # their final evidence block.
+        while channel.recv_ready():
             out_parts.append(channel.recv(65536))
-        while not channel.closed and channel.recv_stderr_ready():
+        while channel.recv_stderr_ready():
             err_parts.append(channel.recv_stderr(65536))
         returncode = -1 if cancelled else 124 if timed_out else channel.recv_exit_status()
         out = b"".join(out_parts).decode("utf-8", errors="replace")

@@ -10,6 +10,7 @@ from d7_factory_studio.transports.zlg.discovery import (
     PE_MACHINE_AMD64,
     REQUIRED_EXPORTS,
     ZlgDllDiscoveryError,
+    iter_controlcanfd_candidates,
     read_pe_machine,
     validate_controlcanfd,
 )
@@ -58,6 +59,19 @@ def test_dll_validation_requires_x64_and_exports(tmp_path: Path) -> None:
         validate_controlcanfd(path, loader=lambda _path: dll)
 
 
+def test_dll_discovery_prefers_x64_secondary_development_library(tmp_path: Path) -> None:
+    preferred = tmp_path / "二次开发库V1.21" / "x64" / "ControlCANFD.dll"
+    fallback = tmp_path / "其他目录" / "ControlCANFD.dll"
+    preferred.parent.mkdir(parents=True)
+    fallback.parent.mkdir(parents=True)
+    preferred.touch()
+    fallback.touch()
+
+    candidates = list(iter_controlcanfd_candidates(search_roots=[tmp_path]))
+
+    assert candidates.index(preferred.resolve()) < candidates.index(fallback.resolve())
+
+
 class FakeZlgDll:
     def __init__(self) -> None:
         self.ZCAN_OpenDevice = FakeFunction(lambda *_args: 0x1000)
@@ -67,6 +81,13 @@ class FakeZlgDll:
         self.ZCAN_ResetCAN = FakeFunction(lambda *_args: STATUS_OK)
         self.ZCAN_SetAbitBaud = FakeFunction(lambda *_args: STATUS_OK)
         self.ZCAN_SetDbitBaud = FakeFunction(lambda *_args: STATUS_OK)
+        self.ZCAN_SetCANFDStandard = FakeFunction(lambda *_args: STATUS_OK)
+        self.ZCAN_SetResistanceEnable = FakeFunction(lambda *_args: STATUS_OK)
+        self.ZCAN_ClearFilter = FakeFunction(lambda *_args: STATUS_OK)
+        self.ZCAN_SetFilterMode = FakeFunction(lambda *_args: STATUS_OK)
+        self.ZCAN_SetFilterStartID = FakeFunction(lambda *_args: STATUS_OK)
+        self.ZCAN_SetFilterEndID = FakeFunction(lambda *_args: STATUS_OK)
+        self.ZCAN_AckFilter = FakeFunction(lambda *_args: STATUS_OK)
         self.ZCAN_Transmit = FakeFunction(lambda *_args: 1)
         self.ZCAN_TransmitFD = FakeFunction(lambda *_args: 1)
         self.ZCAN_Receive = FakeFunction(self._receive_classic)
@@ -96,6 +117,13 @@ def test_type_41_fd_open_and_dual_queue_receive() -> None:
     transport = ZlgCanTransport(dll=dll)
     transport.open(0, CanMode.FD)
     assert dll.ZCAN_OpenDevice.calls[0][0] == ZCAN_USBCANFD_200U == 41
+    assert dll.ZCAN_SetCANFDStandard.calls == [(0x1000, 0, 0)]
+    assert dll.ZCAN_SetResistanceEnable.calls == [(0x1000, 0, 1)]
+    assert dll.ZCAN_ClearFilter.calls == [(0x2000,)]
+    assert dll.ZCAN_SetFilterMode.calls == [(0x2000, 0), (0x2000, 1)]
+    assert dll.ZCAN_SetFilterStartID.calls == [(0x2000, 0), (0x2000, 0)]
+    assert dll.ZCAN_SetFilterEndID.calls == [(0x2000, 0x7FF), (0x2000, 0x1FFFFFFF)]
+    assert dll.ZCAN_AckFilter.calls == [(0x2000,), (0x2000,)]
     frames = transport.receive(0)
     assert [(frame.arbitration_id, frame.is_fd) for frame in frames] == [(0x18, False), (0x300, True)]
     transport.send(CanFrame(0x7FF, b"\x16", is_fd=False, bitrate_switch=False))

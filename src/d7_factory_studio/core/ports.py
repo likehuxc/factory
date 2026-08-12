@@ -39,6 +39,10 @@ class CanTransport(ABC):
     @abstractmethod
     def send(self, frame: CanFrame) -> None: ...
 
+    def send_many(self, frames: Iterable[CanFrame]) -> None:
+        for frame in frames:
+            self.send(frame)
+
     @abstractmethod
     def receive(self, timeout_ms: int = 50) -> list[CanFrame]: ...
 

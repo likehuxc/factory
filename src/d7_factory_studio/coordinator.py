@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -27,7 +28,9 @@ from d7_factory_studio.features.diagnostics import (
     DiagnosticService,
     ParamikoRemoteSession,
     SshConnection,
+    diagnostic_raw_artifacts,
 )
+from d7_factory_studio.features.diagnostics.broadcast import LIVE_RESPONSE_PREFIX
 from d7_factory_studio.features.diagnostics.forwarding import (
     AdbNetworkForwarder,
     ForwardConfig,
@@ -35,10 +38,11 @@ from d7_factory_studio.features.diagnostics.forwarding import (
 from d7_factory_studio.features.firmware import (
     FirmwareImage,
     FirmwareUpgradeController,
+    PaceBatteryUpgradeController,
     UpgradeOptions,
 )
 from d7_factory_studio.features.firmware.profiles import IapDeviceProfile, battery_profile
-from d7_factory_studio.features.motor import OrinMotorService
+from d7_factory_studio.features.motor import LocalCanMotorController, OrinMotorService
 from d7_factory_studio.features.serial485 import (
     CycleOptions,
     Serial485Config,
@@ -54,13 +58,13 @@ from d7_factory_studio.protocols.machine_info import (
     format_machine_info_value,
     parse_machine_info_response,
 )
+from d7_factory_studio.protocols.pace_bms_upgrade import PaceBmsUpgradeProtocol
 from d7_factory_studio.protocols.serial485 import (
     CONTROLWORD_BRAKE_RELEASE,
-    CONTROLWORD_ENABLE,
     CONTROLWORD_STOP_POSITION,
 )
 from d7_factory_studio.reports import ReportBundleWriter
-from d7_factory_studio.settings_store import SettingsStore
+from d7_factory_studio.settings_store import SettingsStore, ssh_fingerprint_key
 from d7_factory_studio.transports.orin_agent import (
     AgentCanTransport,
     OrinAgentClient,
@@ -82,6 +86,7 @@ class ConnectionResources:
 
 class ApplicationCoordinator(QObject):
     agent_event_received = Signal(object)
+    local_can_fault_received = Signal(str)
 
     def __init__(
         self,
@@ -97,7 +102,11 @@ class ApplicationCoordinator(QObject):
         self._resources = ConnectionResources(ConnectionMode.PC_DIRECT)
         self._serial_service: Serial485Service | None = None
         self._serial_controller: Serial485Controller | None = None
+        self._serial_operation_lock = threading.Lock()
+        self._local_can_motor_controller: LocalCanMotorController | None = None
         self._device_log_catalog: dict[str, RemoteFileInfo] = {}
+        self._diagnostic_loop_stop = threading.Event()
+        self._diagnostic_loop_running = False
 
         state.action_requested.connect(self.handle)
         self.tasks.progress.connect(self._on_progress)
@@ -106,6 +115,7 @@ class ApplicationCoordinator(QObject):
         self.tasks.cancelled.connect(self._on_cancelled)
         self.tasks.finished.connect(self._on_finished)
         self.agent_event_received.connect(self._handle_agent_event)
+        self.local_can_fault_received.connect(self._handle_local_can_fault)
 
     @Slot(str, object)
     def handle(self, action: str, payload: object) -> None:
@@ -122,6 +132,8 @@ class ApplicationCoordinator(QObject):
                 self._start_firmware(values)
             elif action == "firmware.cancel":
                 self._cancel_action("firmware.start")
+            elif action in {"firmware.query_role", "firmware.query_version"}:
+                self._query_firmware(action, values)
             elif action.startswith("serial485."):
                 self._handle_serial(action, values)
             elif action.startswith("motor."):
@@ -140,7 +152,14 @@ class ApplicationCoordinator(QObject):
                 raise NotImplementedError(f"尚未注册操作: {action}")
         except Exception as exc:
             self.state.log("任务", f"{action}: {exc}", "error")
-            self.state.notify_task(action, "failed", {"error": str(exc)})
+            notify_action = action
+            if action in {
+                "firmware.start",
+                "firmware.query_role",
+                "firmware.query_version",
+            } and values.get("target"):
+                notify_action = f"{action}.{values['target']}"
+            self.state.notify_task(notify_action, "failed", {"error": str(exc)})
 
     def _connect(self, payload: dict[str, Any]) -> None:
         if self.tasks.is_running("connection.connect"):
@@ -160,11 +179,15 @@ class ApplicationCoordinator(QObject):
                     arbitration_baudrate=1_000_000,
                     data_baudrate=5_000_000,
                 )
-                transport = ZlgCanTransport(config)
+                transport = ZlgCanTransport(
+                    config,
+                    on_trace=lambda message: self.state.log("CAN 帧", message),
+                )
                 interface = self.state.evt.interfaces[self.state.active_interface]
                 report(45, "正在打开 USBCANFD-200U")
                 try:
-                    transport.open(int(self.settings.value("zlg/channel", 0)), interface.mode)
+                    channel = int(payload.get("channel", self.settings.value("zlg/channel", 0)))
+                    transport.open(channel, interface.mode)
                     token.raise_if_cancelled()
                     report(100, "PC CAN 已连接")
                     return ConnectionResources(mode, can_transport=transport)
@@ -173,10 +196,12 @@ class ApplicationCoordinator(QObject):
                     raise
 
             host = str(self.settings.value("ssh/host", "")).strip()
-            username = str(self.settings.value("ssh/username", "")).strip()
+            username = str(self.settings.value("ssh/username", "pudu")).strip() or "pudu"
             port = int(self.settings.value("ssh/port", 22))
-            fingerprint = str(self.settings.value("ssh/fingerprint", "")).strip()
-            password = self.settings.ssh_password(host, username) or ""
+            fingerprint = str(
+                self.settings.value(ssh_fingerprint_key(host), "")
+            ).strip()
+            password = self.settings.ssh_password(host, username) or "pudu"
             if not host or not username or not password:
                 raise ValueError("请先在设置中填写 Orin 主机、用户名并保存密码")
             client = OrinAgentClient(on_event=self.agent_event_received.emit)
@@ -214,9 +239,9 @@ class ApplicationCoordinator(QObject):
                     if status != 0 or not home.strip().startswith("/"):
                         raise RuntimeError(error.strip() or "无法确定 Orin 用户目录")
                     remote_root = f"{home.strip()}/.local/share/d7-factory-studio"
-                    remote_binary = f"{remote_root}/bin/d7-factory-agent"
+                    remote_binary = f"{remote_root}/bin/d7-factory-can-agent"
                     remote_config = f"{remote_root}/config/d7-agent.yaml"
-                    report(70, "正在部署会话级 motor agent")
+                    report(70, "正在部署独立 SocketCAN Agent")
                     client.deploy_file(binary, remote_binary, executable=True)
                     if config_path is not None:
                         if not config_path.is_file():
@@ -226,23 +251,13 @@ class ApplicationCoordinator(QObject):
                         client.deploy_bytes(
                             agent_config_yaml(self.state.evt).encode("utf-8"), remote_config
                         )
-                    library_dir = self._agent_library_dir()
-                    if library_dir.is_dir():
-                        for library in sorted(library_dir.glob("*.so*")):
-                            if library.is_file():
-                                client.deploy_file(library, f"{remote_root}/lib/{library.name}")
                     token.raise_if_cancelled()
-                    remote_library_path = (
-                        f"{remote_root}/lib:{home.strip()}/.local/d7-factory-agent/lib"
-                    )
-                    hello = client.start(remote_binary, remote_config, remote_library_path)
-                    if hello.get("protocol") != "d7-factory-agent-jsonl":
-                        raise RuntimeError("Orin agent 协议握手失败")
-                    client.request("state.subscribe")
-                    motor_service = OrinMotorService(client)
+                    hello = client.start(remote_binary, remote_config)
+                    if hello.get("protocol") != "d7-factory-can-agent-jsonl":
+                        raise RuntimeError("Orin SocketCAN Agent 协议握手失败")
                 else:
                     warning = (
-                        "未找到内置或自定义 ARM64 agent；"
+                        "未找到内置或自定义 SocketCAN Agent；"
                         "远程诊断可用，CAN 电机保持禁用"
                     )
                 token.raise_if_cancelled()
@@ -266,11 +281,17 @@ class ApplicationCoordinator(QObject):
         report(20, "正在停止任务并关闭连接")
         self.tasks.cancel_all(exclude={"connection.disconnect"})
         self._close_resources()
-        self._close_serial()
         report(100, "已断开")
 
     def _close_resources(self) -> None:
         errors: list[Exception] = []
+        if self._local_can_motor_controller is not None:
+            try:
+                self._local_can_motor_controller.shutdown()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                self._local_can_motor_controller = None
         for resource in (
             self._resources.can_transport,
             self._resources.agent_client,
@@ -286,10 +307,36 @@ class ApplicationCoordinator(QObject):
             self.state.log("连接", f"关闭连接时出现 {len(errors)} 个错误: {errors[0]}", "error")
 
     def _start_firmware(self, payload: dict[str, Any]) -> None:
+        target_name = str(payload["target"])
+        protocol_name = str(payload.get("protocol", "d7_iap"))
+        if self.tasks.is_running(f"firmware.query:{target_name}"):
+            raise RuntimeError("设备信息查询尚未结束，请稍后开始升级")
+
+        if target_name == "battery" and protocol_name == "pace_bin":
+            if self._resources.mode is ConnectionMode.ORIN_REMOTE:
+                raise RuntimeError(
+                    "Pace BIN 升级当前仅支持 PC 直连（CAN 盒）；Orin Agent 尚未支持 29 位扩展帧"
+                )
+            transport = self._firmware_transport()
+            address = int(payload.get("battery_address", 0))
+
+            def pace_operation(token: CancellationToken, report) -> dict[str, Any]:
+                controller = PaceBatteryUpgradeController(
+                    transport,
+                    PaceBmsUpgradeProtocol(address),
+                    on_log=lambda message: self.state.log("电池升级", message),
+                    on_progress=report,
+                )
+                result = controller.upgrade_file(str(payload["firmware"]), token=token)
+                return {"target": target_name, "protocol": protocol_name, **result}
+
+            event_action = f"firmware.start.{target_name}"
+            self._start(event_action, pace_operation, task_id=f"firmware.start:{target_name}")
+            return
+
         transport = self._firmware_transport()
         target_id = int(payload["target_id"])
         iap_id = int(payload["iap_id"])
-        target_name = str(payload["target"])
 
         def operation(token: CancellationToken, report) -> dict[str, Any]:
             image = FirmwareImage.from_file(str(payload["firmware"]))
@@ -311,6 +358,36 @@ class ApplicationCoordinator(QObject):
         event_action = f"firmware.start.{target_name}"
         self._start(event_action, operation, task_id=f"firmware.start:{target_name}")
 
+    def _query_firmware(self, action: str, payload: dict[str, Any]) -> None:
+        target_name = str(payload["target"])
+        if self.tasks.is_running(f"firmware.query:{target_name}"):
+            raise RuntimeError("设备信息查询正在运行")
+        if self.tasks.is_running(f"firmware.start:{target_name}"):
+            raise RuntimeError("固件升级正在运行，不能同时查询设备信息")
+        transport = self._firmware_transport()
+        target_id = int(payload["target_id"])
+        iap_id = int(payload["iap_id"])
+
+        def operation(token: CancellationToken, report) -> dict[str, Any]:
+            report(10, "正在发送 D7 IAP 查询")
+            controller = FirmwareUpgradeController(
+                transport,
+                IapProtocol(target_id, iap_id),
+                on_log=lambda message: self.state.log("升级", message),
+            )
+            if action == "firmware.query_role":
+                role = controller.query_role(token=token)
+                self.state.log("升级", f"当前设备角色：{role}")
+                report(100, f"当前设备角色：{role}")
+                return {"target": target_name, "role": role}
+            version = controller.query_software_version(token=token)
+            self.state.log("升级", f"当前软件版本：{version}")
+            report(100, f"当前软件版本：{version}")
+            return {"target": target_name, "version": version}
+
+        event_action = f"{action}.{target_name}"
+        self._start(event_action, operation, task_id=f"firmware.query:{target_name}")
+
     def _firmware_transport(self) -> CanTransport:
         if self._resources.mode is ConnectionMode.ORIN_REMOTE:
             client = self._require_agent()
@@ -327,31 +404,138 @@ class ApplicationCoordinator(QObject):
         if action in {"serial485.cancel", "serial485.cycle_cancel"}:
             self._cancel_action("serial485.cycle_start")
             return
-        controller = self._serial(payload)
         operation_name = action.removeprefix("serial485.")
 
-        def operation(token: CancellationToken, report) -> object:
+        if operation_name == "open":
+            def open_operation(token: CancellationToken, report) -> object:
+                report(20, "正在打开 485 串口")
+                token.raise_if_cancelled()
+                controller = self._open_serial(payload)
+                report(100, "485 通信已打开")
+                return {
+                    "port": controller.service.config.port,
+                    "baud": controller.service.config.baudrate,
+                }
+
+            self._start(action, open_operation, task_id="serial485.connection")
+            return
+
+        if operation_name == "close":
+            self._cancel_action("serial485.")
+
+            def close_operation(_token: CancellationToken, report) -> object:
+                report(30, "正在关闭 485 串口")
+                self._close_serial()
+                report(100, "485 通信已关闭")
+                return {"closed": True}
+
+            self._start(action, close_operation, task_id="serial485.connection")
+            return
+
+        controller = self._require_serial(payload)
+        if operation_name == "stop":
+            self._cancel_action("serial485.")
+
+        def run_serial_operation(token: CancellationToken, report) -> object:
             controller.on_progress = report
             comm_id = int(payload.get("station_id", 0))
             if operation_name == "scan":
                 return controller.scan(token)
+            if operation_name == "connect":
+                connection = controller.connect(comm_id, allow_station_fallback=False)
+                return {
+                    "present": True,
+                    "comm_id": connection.comm_id,
+                    "station": connection.station,
+                    "attempts": connection.attempts,
+                    "echo_frame": connection.echo_frame.hex(" ").upper(),
+                    "echo_ok": connection.echo_ok,
+                    "register_value": connection.register_value,
+                    "device_id": connection.device_id,
+                    "device_name": connection.device_name,
+                    "hardware_version": connection.hardware_version,
+                    "software_version": connection.software_version,
+                    "parameters": [
+                        {"address": address, "value": value}
+                        for address, value in connection.parameter_values
+                    ],
+                    "parameter_error": connection.parameter_error,
+                }
             if operation_name == "read_identity":
-                return {"present": controller.probe(comm_id), "comm_id": comm_id}
+                identity = controller.read_identity(comm_id)
+                return {
+                    "present": True,
+                    "comm_id": identity.comm_id,
+                    "register_value": identity.register_value,
+                    "parameter": f"通讯 ID 寄存器 0x{identity.register_value:04X}",
+                }
             if operation_name == "write_identity":
-                controller.write_comm_id(int(payload["new_id"]), token)
+                identity = controller.write_comm_id(
+                    int(payload["new_id"]),
+                    token,
+                    current_comm_id=comm_id,
+                )
+                return {
+                    "comm_id": identity.comm_id,
+                    "register_value": identity.register_value,
+                    "verified": True,
+                    "verification": "0x08_echo",
+                    "parameter_error": identity.parameter_error,
+                }
+            if operation_name == "reset_identity":
+                controller.broadcast_reset_comm_id(token)
+            elif operation_name == "phase_identify":
+                result = controller.identify_wheel_phases(comm_id, token)
+                return {
+                    "phase_sequence": result.phase_sequence,
+                    "phase_sequence_text": "UVW" if result.phase_sequence == 0 else "UWV",
+                    "encoder_offset": result.encoder_offset,
+                }
             elif operation_name == "take_control":
                 controller.take_control_authority(comm_id, token)
             elif operation_name == "release_control":
                 controller.release_control_authority(comm_id, token)
             elif operation_name == "enable":
-                controller.set_controlword(comm_id, CONTROLWORD_ENABLE, token)
+                statusword = controller.enable_servo(comm_id, token)
+                return {
+                    "operation": operation_name,
+                    "comm_id": comm_id,
+                    "statusword": statusword,
+                }
             elif operation_name == "release_brake":
                 controller.set_controlword(comm_id, CONTROLWORD_BRAKE_RELEASE, token)
             elif operation_name == "set_velocity":
-                value = float(payload.get("rad_s", 0))
-                controller.set_speed(comm_id, "forward" if value > 0 else "reverse" if value < 0 else "stop", token)
+                controller.set_speed(
+                    comm_id,
+                    float(payload.get("rad_s", 0)),
+                    token,
+                    duration_s=(
+                        float(payload["duration_s"])
+                        if payload.get("duration_s") is not None
+                        else None
+                    ),
+                    accel_rad_s2=float(payload.get("accel_rad_s2", 1.0)),
+                    decel_rad_s2=float(payload.get("decel_rad_s2", 1.0)),
+                )
+            elif operation_name == "read_position":
+                position = controller.read_absolute_position(comm_id)
+                return {"position_rad": position.radians, "position_counts": position.counts}
+            elif operation_name == "move_absolute":
+                controller.move_absolute(
+                    comm_id,
+                    position_rad=float(payload["position_rad"]),
+                    accel_rad_s2=float(payload.get("accel_rad_s2", 1.0)),
+                    decel_rad_s2=float(payload.get("decel_rad_s2", 1.0)),
+                    token=token,
+                )
             elif operation_name == "move_relative":
-                controller.move_relative(comm_id, angle_degrees=float(payload["angle_deg"]), token=token)
+                controller.move_relative_angle(
+                    comm_id,
+                    angle_deg=float(payload["angle_deg"]),
+                    accel_rad_s2=float(payload.get("accel_rad_s2", 1.0)),
+                    decel_rad_s2=float(payload.get("decel_rad_s2", 1.0)),
+                    token=token,
+                )
             elif operation_name == "stop":
                 controller.set_speed(comm_id, "stop", token)
                 controller.set_controlword(comm_id, CONTROLWORD_STOP_POSITION, token)
@@ -369,21 +553,63 @@ class ApplicationCoordinator(QObject):
                 raise NotImplementedError(operation_name)
             return {"operation": operation_name, "comm_id": comm_id}
 
-        self._start(action, operation)
+        def operation(token: CancellationToken, report) -> object:
+            if operation_name == "stop":
+                return run_serial_operation(token, report)
+            if not self._serial_operation_lock.acquire(blocking=False):
+                raise RuntimeError("485 正在执行其他操作，请等待当前操作完成")
+            try:
+                return run_serial_operation(token, report)
+            finally:
+                self._serial_operation_lock.release()
 
-    def _serial(self, payload: dict[str, Any]) -> Serial485Controller:
+        self._start(action, operation, task_id="serial485.scan" if operation_name == "scan" else None)
+
+    def _open_serial(self, payload: dict[str, Any]) -> Serial485Controller:
         port = str(payload.get("port", ""))
         baud = int(payload.get("baud", 115200))
         config = Serial485Config(port, baud)
-        if self._serial_service is None or self._serial_service.config != config:
+        if (
+            self._serial_service is None
+            or self._serial_controller is None
+            or self._serial_service.config != config
+            or not self._serial_service.is_open
+        ):
             self._close_serial()
-            self._serial_service = Serial485Service(config)
-            self._serial_service.open()
-            self._serial_controller = Serial485Controller(
-                self._serial_service,
-                on_log=lambda message: self.state.log("485", message),
-            )
+            service = Serial485Service(config)
+            try:
+                service.open()
+                controller = Serial485Controller(
+                    service,
+                    on_log=lambda message: self.state.log("485", message),
+                )
+            except Exception:
+                service.close()
+                self._serial_service = None
+                self._serial_controller = None
+                raise
+            self._serial_service = service
+            self._serial_controller = controller
         assert self._serial_controller is not None
+        return self._serial_controller
+
+    def _require_serial(self, payload: dict[str, Any]) -> Serial485Controller:
+        if (
+            self._serial_service is None
+            or self._serial_controller is None
+            or not self._serial_service.is_open
+        ):
+            raise RuntimeError("485 通信尚未打开，请先点击“打开 485”")
+        # The global status rail owns the serial connection. Subpages deliberately
+        # send only operation arguments, so validate the connection settings only
+        # when a legacy caller explicitly supplies them.
+        if "port" in payload or "baud" in payload:
+            requested = Serial485Config(
+                str(payload.get("port", self._serial_service.config.port)),
+                int(payload.get("baud", self._serial_service.config.baudrate)),
+            )
+            if self._serial_service.config != requested:
+                raise RuntimeError("串口或波特率已变化，请先关闭再重新打开 485")
         return self._serial_controller
 
     def _close_serial(self) -> None:
@@ -396,13 +622,15 @@ class ApplicationCoordinator(QObject):
         if action in {"motor.long_test_cancel"}:
             self._cancel_action("motor.long_test_start")
             return
-        service = self._require_motor_service()
         target = dict(payload.get("target", {}))
         operation_name = action.removeprefix("motor.")
         unlocked_operations = {
             "enable",
+            "release_brake",
             "set_mode",
             "set_position",
+            "move_absolute",
+            "move_relative",
             "set_velocity",
             "param_write",
             "param_save",
@@ -414,8 +642,45 @@ class ApplicationCoordinator(QObject):
         if operation_name in unlocked_operations and self.state.safety_locked:
             raise PermissionError("本次连接会话尚未解除安全锁")
 
+        source = ConnectionMode(str(payload.get("source", self.state.connection_mode.value)))
+        if source is not self._resources.mode:
+            raise RuntimeError("所选 CAN 通信来源尚未连接")
+        raw_can_operations = {
+            "probe",
+            "enable",
+            "disable",
+            "clear_errors",
+            "take_control",
+            "release_control",
+            "set_position",
+            "move_absolute",
+            "move_relative",
+            "read_position",
+            "set_velocity",
+            "emergency_stop",
+        }
+        if operation_name in raw_can_operations:
+            if source is ConnectionMode.PC_DIRECT and operation_name not in {
+                "probe",
+                "read_position",
+                "disable",
+                "emergency_stop",
+            }:
+                raise RuntimeError(
+                    "CAN 盒直控已安全禁用：此前切换控制源会中断 EtherCAT。"
+                    "在厂家提供已验证的 EtherCAT 恢复/直控协议前，仅允许扫描、读取位置和失能。"
+                )
+            if operation_name == "probe":
+                self._handle_can_probe(action, target, source)
+                return
+            self._handle_can_motor(action, operation_name, target, payload)
+            return
+        if source is ConnectionMode.PC_DIRECT:
+            raise RuntimeError("该功能尚未支持 CAN 盒直连")
+        service = self._require_motor_service()
+
         def operation(token: CancellationToken, report) -> object:
-            if operation_name in {"enable", "disable", "clear_errors"}:
+            if operation_name in {"enable", "disable", "clear_errors", "release_brake"}:
                 getattr(service, operation_name)(target)
                 return {}
             if operation_name in {"take_control", "release_control"}:
@@ -424,8 +689,34 @@ class ApplicationCoordinator(QObject):
                 service.set_mode(target, str(payload["mode"]))
             elif operation_name == "set_position":
                 service.set_position(target, float(payload["angle_deg"]))
+            elif operation_name == "move_absolute":
+                service.set_position_rad(target, float(payload["position_rad"]))
+            elif operation_name == "move_relative":
+                return service.move_relative(target, float(payload["angle_deg"]))
+            elif operation_name == "read_position":
+                return service.read_position(target)
             elif operation_name == "set_velocity":
-                service.set_velocity(target, float(payload["rad_s"]), int(payload["accel_time_ms"]))
+                rad_s = float(payload["rad_s"])
+                if "accel_time_ms" in payload:
+                    accel_time_ms = int(payload["accel_time_ms"])
+                elif "accel_rad_s2" in payload:
+                    accel = float(payload["accel_rad_s2"])
+                    if accel <= 0:
+                        raise ValueError("加速度必须大于 0")
+                    accel_time_ms = max(1, min(65535, round(abs(rad_s) / accel * 1000)))
+                else:
+                    accel_time_ms = 1000
+                decel = float(payload.get("decel_rad_s2", 1.0))
+                if decel <= 0:
+                    raise ValueError("减速度必须大于 0")
+                decel_time_ms = max(1, min(65535, round(abs(rad_s) / decel * 1000)))
+                service.set_velocity(target, rad_s, accel_time_ms)
+                duration_s = payload.get("duration_s")
+                if duration_s is not None:
+                    try:
+                        self._sleep_with_cancel(float(duration_s), token)
+                    finally:
+                        service.emergency_stop(target, decel_time_ms)
             elif operation_name == "emergency_stop":
                 service.emergency_stop(target)
             elif operation_name == "zero_prepare":
@@ -441,6 +732,217 @@ class ApplicationCoordinator(QObject):
             return {}
 
         self._start(action, operation)
+
+    def _handle_can_motor(
+        self,
+        action: str,
+        operation_name: str,
+        target: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        nodes = self._local_motor_nodes(target)
+        buses = {node.bus for node in nodes}
+        if len(buses) != 1:
+            raise RuntimeError("一次电机控制只能选择同一路 CAN 上的电机")
+        transport = self._require_can(next(iter(buses)))
+        if not transport.is_open:
+            raise RuntimeError("CAN 通道尚未打开")
+        controller = self._local_can_controller(transport)
+        device_ids = [node.dev_id for node in nodes]
+        logic_by_device = {node.dev_id: node.logic_id for node in nodes}
+
+        def operation(token: CancellationToken, report) -> object:
+            token.raise_if_cancelled()
+            if operation_name == "read_position":
+                positions = controller.read_positions(device_ids, token)
+                mapped = {
+                    str(logic_by_device[device_id]): value
+                    for device_id, value in positions.items()
+                }
+                if len(mapped) == 1:
+                    return {"position_rad": next(iter(mapped.values())), "positions": mapped}
+                return {"positions": mapped}
+            if operation_name == "enable":
+                result = controller.enable_position_hold(device_ids, token, report)
+                return {
+                    "motors": [node.logic_id for node in nodes],
+                    "positions": {
+                        str(logic_by_device[device_id]): value
+                        for device_id, value in result["positions"].items()
+                    },
+                    "statuses": {
+                        str(logic_by_device[device_id]): value
+                        for device_id, value in result["statuses"].items()
+                    },
+                    "heartbeat_hz": result["heartbeat_hz"],
+                }
+            if operation_name == "move_relative":
+                delta = float(payload["angle_deg"]) * 3.141592653589793 / 180.0
+                positions = controller.move_relative(device_ids, delta, token)
+                return {
+                    "positions": {
+                        str(logic_by_device[device_id]): value
+                        for device_id, value in positions.items()
+                    }
+                }
+            if operation_name == "set_velocity":
+                rad_s = float(payload["rad_s"])
+                duration_s = float(payload.get("duration_s", 0))
+                accel = float(payload.get("accel_rad_s2", 1.0))
+                decel = float(payload.get("decel_rad_s2", 1.0))
+                if duration_s <= 0:
+                    raise ValueError("CAN 速度运动必须设置大于 0 的运动时间")
+                if accel <= 0 or decel <= 0:
+                    raise ValueError("加速度和减速度必须大于 0")
+                accel_time_ms = max(1, min(65535, round(abs(rad_s) / accel * 1000)))
+                decel_time_ms = max(1, min(65535, round(abs(rad_s) / decel * 1000)))
+                result = controller.run_velocity(
+                    device_ids,
+                    rad_s,
+                    duration_s,
+                    accel_time_ms,
+                    decel_time_ms,
+                    token,
+                )
+                return {
+                    "motors": [node.logic_id for node in nodes],
+                    "rad_s": rad_s,
+                    "duration_s": duration_s,
+                    "positions": {
+                        str(logic_by_device[device_id]): value
+                        for device_id, value in result["positions"].items()
+                    },
+                    "statuses": {
+                        str(logic_by_device[device_id]): value
+                        for device_id, value in result["statuses"].items()
+                    },
+                    "safe_state": result["safe_state"],
+                }
+            if operation_name in {"release_brake", "release_control"}:
+                raise RuntimeError(f"暂不支持已验证的 {operation_name} 协议")
+            if operation_name in {"move_absolute", "set_position"}:
+                position_rad = (
+                    float(payload["position_rad"])
+                    if operation_name == "move_absolute"
+                    else float(payload["angle_deg"]) * 3.141592653589793 / 180.0
+                )
+                controller.set_positions(
+                    {node.dev_id: position_rad for node in nodes},
+                    token,
+                )
+                return {"position_rad": position_rad}
+            if operation_name == "take_control":
+                controller.take_control(device_ids, token)
+            elif operation_name == "clear_errors":
+                controller.clear_errors(device_ids, token)
+            elif operation_name == "disable":
+                controller.safe_stop(device_ids)
+            elif operation_name == "emergency_stop":
+                controller.emergency_stop(device_ids)
+            else:
+                raise NotImplementedError(operation_name)
+            return {"motors": [node.logic_id for node in nodes]}
+
+        if operation_name in {"disable", "emergency_stop"}:
+            self.tasks.cancel("motor.local_can.operation")
+            self._start(action, operation)
+            return
+        if self.tasks.is_running("motor.local_can.operation"):
+            raise RuntimeError("CAN 正在执行其他电机操作")
+        self._start(action, operation, task_id="motor.local_can.operation")
+
+    def _handle_can_probe(
+        self,
+        action: str,
+        target: dict[str, Any],
+        source: ConnectionMode,
+    ) -> None:
+        nodes = self._local_motor_nodes(target)
+        nodes_by_bus: dict[str, list[Any]] = {}
+        for node in nodes:
+            nodes_by_bus.setdefault(node.bus, []).append(node)
+
+        def operation(token: CancellationToken, report) -> object:
+            online: list[int] = []
+            missing: list[int] = []
+            response_ids: set[int] = set()
+            positions: dict[str, float] = {}
+            statuses: dict[str, int] = {}
+            total_buses = len(nodes_by_bus)
+            for bus_index, (bus, bus_nodes) in enumerate(nodes_by_bus.items(), 1):
+                token.raise_if_cancelled()
+                report(
+                    round((bus_index - 1) * 100 / max(1, total_buses)),
+                    f"正在检测 {bus.upper()} 的 {len(bus_nodes)} 台电机",
+                )
+                transport = self._require_can(bus)
+                controller = self._local_can_controller(transport)
+                result = controller.probe(
+                    [node.dev_id for node in bus_nodes], token
+                )
+                response_ids.update(int(value) for value in result["response_ids"])
+                by_device = {node.dev_id: node for node in bus_nodes}
+                for device_id, item in result["feedback"].items():
+                    node = by_device[device_id]
+                    online.append(node.logic_id)
+                    positions[str(node.logic_id)] = item.position_rad
+                    statuses[str(node.logic_id)] = item.status
+                missing.extend(
+                    by_device[device_id].logic_id for device_id in result["missing"]
+                )
+            report(100, f"目标检测完成：在线 {len(online)}/{len(nodes)}")
+            return {
+                "source": source.value,
+                "target": dict(target),
+                "total": len(nodes),
+                "online": sorted(online),
+                "missing": sorted(missing),
+                "response_ids": sorted(response_ids),
+                "positions": positions,
+                "statuses": statuses,
+            }
+
+        if self.tasks.is_running("motor.local_can.operation"):
+            raise RuntimeError("CAN 正在执行其他电机操作")
+        self._start(action, operation, task_id="motor.local_can.operation")
+
+    def _handle_local_can_motor(
+        self,
+        action: str,
+        operation_name: str,
+        target: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        """Compatibility entry point for the shared PC/Orin CAN controller."""
+        self._handle_can_motor(action, operation_name, target, payload)
+
+    def _local_can_controller(self, transport: CanTransport) -> LocalCanMotorController:
+        controller = self._local_can_motor_controller
+        if controller is not None and controller.transport is transport:
+            return controller
+        if controller is not None:
+            controller.shutdown()
+        controller = LocalCanMotorController(
+            transport,
+            on_fault=self.local_can_fault_received.emit,
+        )
+        self._local_can_motor_controller = controller
+        return controller
+
+    def _local_motor_nodes(self, target: dict[str, Any]) -> list[Any]:
+        if set(target) == {"motor"}:
+            logic_ids = [int(target["motor"])]
+        elif set(target) == {"group"}:
+            logic_ids = list(self.state.evt.fixed_groups.get(str(target["group"]), ()))
+        elif "motors" in target:
+            logic_ids = [int(value) for value in target["motors"]]
+        else:
+            raise ValueError("只支持单电机或固定分组目标")
+        by_id = {node.logic_id: node for node in self.state.evt.nodes}
+        try:
+            return [by_id[logic_id] for logic_id in logic_ids]
+        except KeyError as exc:
+            raise ValueError(f"未知逻辑 ID: {exc.args[0]}") from exc
 
     def _motor_parameters(
         self,
@@ -510,13 +1012,27 @@ class ApplicationCoordinator(QObject):
 
     def _handle_diagnostics(self, action: str, payload: dict[str, Any]) -> None:
         if action == "diagnostics.stress_cancel":
-            self._cancel_action("diagnostics.stress_start")
+            if self._diagnostic_loop_running:
+                self._diagnostic_loop_stop.set()
+                self.state.log("诊断", "已请求停止，将在当前轮完成后生成汇总报告", "warning")
+            else:
+                self._cancel_action("diagnostics.stress_start")
             return
         session = self._require_remote()
         service = DiagnosticService(self.state.evt, session)
+        sudo_password = (
+            session.connection.password if isinstance(session, ParamikoRemoteSession) else None
+        )
 
         def operation(token: CancellationToken, report) -> object:
             def emit(line: str, is_error: bool) -> None:
+                if (
+                    action == "diagnostics.broadcast"
+                    and not is_error
+                    and line.startswith(f"{LIVE_RESPONSE_PREFIX}:")
+                ):
+                    self.state.notify_task(action, "output", {"output": line})
+                    return
                 self.state.log("诊断", line, "error" if is_error else "info")
 
             if action == "diagnostics.socketcan_probe" or action == "diagnostics.network_probe":
@@ -544,7 +1060,7 @@ class ApplicationCoordinator(QObject):
 
                 results = []
                 for index, config in enumerate(self.state.evt.interfaces.values(), 1):
-                    for request in configure_requests(config):
+                    for request in configure_requests(config, sudo_password):
                         results.append(session.execute(request, token, emit))
                     report(round(index * 100 / len(self.state.evt.interfaces)), config.name)
                 return {"configured": [config.name for config in self.state.evt.interfaces.values()]}
@@ -553,24 +1069,126 @@ class ApplicationCoordinator(QObject):
                 from d7_factory_studio.features.diagnostics.profiles import safe_random_ids
 
                 clear_dmesg = bool(payload.get("clear_dmesg", False))
-                if clear_dmesg and not self._setting_enabled("safety/allow_dmesg_clear"):
-                    raise PermissionError("设置中未允许 dmesg -C 高风险操作")
                 options = DiagnosticOptions(
                     profile=profile,
                     fixed_can_id=safe_random_ids(self.state.evt)[0],
                     duration_s=int(payload["duration_s"]),
                     gap_ms=int(payload["gap_ms"]),
+                    setup_can_script=str(payload.get("setup_can_script", "")).strip() or None,
+                    setup_each_stage=bool(payload.get("setup_each_stage", False)),
                     clear_dmesg=clear_dmesg,
                     high_risk_dmesg_clear_confirmed=clear_dmesg,
                 )
-                result = service.run(tuple(payload["interfaces"]), options, token, emit)
-                run_id = time.strftime("%Y%m%d-%H%M%S") + "-diagnostics"
-                bundle = ReportBundleWriter().write(self.settings.report_directory / run_id, result)
-                return {"result": result, "bundle": bundle}
+                interfaces = tuple(str(value) for value in payload["interfaces"])
+                loop_enabled = bool(payload.get("loop", False))
+                self._diagnostic_loop_running = loop_enabled
+                self._diagnostic_loop_stop.clear()
+                run_id = time.strftime("%Y%m%d-%H%M%S") + f"-{uuid.uuid4().hex[:6]}-diagnostics"
+                run_root = self.settings.report_directory / run_id
+                rounds: list[dict[str, object]] = []
+                writer = ReportBundleWriter()
+                try:
+                    round_index = 1
+                    while True:
+                        token.raise_if_cancelled()
+
+                        def round_progress(
+                            value: int,
+                            message: str,
+                            round_number: int = round_index,
+                        ) -> None:
+                            prefix = f"第 {round_number} 轮 · " if loop_enabled else ""
+                            report(value, prefix + message)
+
+                        report(0, f"第 {round_index} 轮开始" if loop_enabled else "链路测试开始")
+                        result = service.run(
+                            interfaces,
+                            options,
+                            token,
+                            emit,
+                            round_progress,
+                            sudo_password=sudo_password,
+                        )
+                        verdict = str(
+                            result.get("evaluation", {}).get("verdict", "FAIL")
+                            if isinstance(result.get("evaluation"), dict)
+                            else "FAIL"
+                        ).upper()
+                        round_bundle = writer.write(
+                            run_root / f"round-{round_index:03d}" if loop_enabled else run_root,
+                            result,
+                            raw_artifacts=diagnostic_raw_artifacts(result),
+                            secrets=(sudo_password or "",),
+                        )
+                        rounds.append(
+                            {
+                                "round": round_index,
+                                "verdict": verdict,
+                                "result": result,
+                                "bundle": round_bundle,
+                            }
+                        )
+                        execution = result.get("execution", {})
+                        execution_status = (
+                            str(execution.get("status", "complete"))
+                            if isinstance(execution, dict)
+                            else "complete"
+                        )
+                        if execution_status == "not_started":
+                            emit(
+                                "诊断前置检查未通过，本轮没有执行任何链路流量阶段；"
+                                "已停止循环并生成失败报告",
+                                True,
+                            )
+                        else:
+                            emit(
+                                f"第 {round_index} 轮完成：{verdict}"
+                                if loop_enabled
+                                else f"测试完成：{verdict}",
+                                verdict == "FAIL",
+                            )
+                        if (
+                            not loop_enabled
+                            or self._diagnostic_loop_stop.is_set()
+                            or execution_status == "not_started"
+                        ):
+                            break
+                        round_index += 1
+                    if not loop_enabled:
+                        return {"result": result, "bundle": round_bundle, "rounds": rounds}
+                    summary = self._diagnostic_loop_summary(interfaces, rounds)
+                    bundle = writer.write(
+                        run_root,
+                        summary,
+                        raw_artifacts=self._diagnostic_loop_raw_artifacts(rounds),
+                        secrets=(sudo_password or "",),
+                    )
+                    report(100, f"循环测试已停止，共完成 {len(rounds)} 轮")
+                    return {"result": summary, "bundle": bundle, "rounds": rounds}
+                finally:
+                    self._diagnostic_loop_running = False
+                    self._diagnostic_loop_stop.clear()
             if action == "diagnostics.node_param_read" or action == "diagnostics.node_param_write":
-                return service.run_node_parameters(
-                    str(self.settings.value("diagnostics/node_binary", "~/d7/bin/joint_param")),
+                interface = str(payload.get("interface", ""))
+                motor_interfaces = {node.bus for node in self.state.evt.nodes}
+                if interface not in motor_interfaces:
+                    raise ValueError(f"当前 {self.state.evt.variant} 不包含电机通道 {interface}")
+                report(1, "正在执行 setup_can.sh")
+                service.prepare_motor_can(
                     token,
+                    on_output=emit,
+                    sudo_password=sudo_password,
+                )
+                report(5, f"{interface.upper()} 开始参数检查")
+                return service.run_node_parameters(
+                    str(
+                        self.settings.value(
+                            "diagnostics/node_binary",
+                            "/opt/actuator_sdk/jihua_calib_param_factory",
+                        )
+                    ),
+                    token,
+                    buses=(interface,),
                     logic_ids=tuple(int(value) for value in payload.get("logic_ids", [])),
                     write_then_read=action.endswith("write"),
                     on_output=emit,
@@ -579,7 +1197,39 @@ class ApplicationCoordinator(QObject):
                 interface = str(payload.get("interface", ""))
                 if interface not in self.state.evt.interfaces:
                     raise ValueError(f"当前 {self.state.evt.variant} 不包含接口 {interface}")
-                return service.run_broadcast(interface, 60, token, on_output=emit)
+                duration_s = int(payload.get("duration_s", 10))
+                if not 1 <= duration_s <= 300:
+                    raise ValueError("广播时长必须在 1..300 秒")
+                report(1, "正在执行 setup_can.sh")
+                service.prepare_motor_can(
+                    token,
+                    on_output=emit,
+                    sudo_password=sudo_password,
+                )
+                finished = threading.Event()
+
+                def broadcast_progress() -> None:
+                    started = time.monotonic()
+                    while not finished.wait(1.0):
+                        elapsed = min(duration_s, int(time.monotonic() - started))
+                        report(
+                            min(95, round(elapsed * 95 / duration_s)),
+                            f"{interface.upper()} 监听 {elapsed}/{duration_s}s",
+                        )
+
+                progress_thread = threading.Thread(
+                    target=broadcast_progress,
+                    name="d7-broadcast-progress",
+                    daemon=True,
+                )
+                progress_thread.start()
+                try:
+                    result = service.run_broadcast(interface, duration_s, token, on_output=emit)
+                    report(100, f"{interface.upper()} 广播监听完成")
+                    return result
+                finally:
+                    finished.set()
+                    progress_thread.join(timeout=0.2)
             if action in {"diagnostics.timing_calculate", "diagnostics.tdc_calculate"}:
                 from d7_factory_studio.features.diagnostics.timing import best_candidate, tdcr
 
@@ -595,6 +1245,74 @@ class ApplicationCoordinator(QObject):
             raise NotImplementedError(action)
 
         self._start(action, operation)
+
+    def _diagnostic_loop_summary(
+        self,
+        interfaces: tuple[str, ...],
+        rounds: list[dict[str, object]],
+    ) -> dict[str, object]:
+        verdicts = [str(item.get("verdict", "FAIL")).upper() for item in rounds]
+        verdict = "FAIL" if "FAIL" in verdicts else "WARN" if "WARN" in verdicts else "PASS"
+        findings = [
+            f"第 {item['round']} 轮：{item.get('verdict', 'FAIL')}"
+            for item in rounds
+        ]
+        stages: list[dict[str, object]] = []
+        planned_stage_count = 0
+        executed_stage_count = 0
+        for item in rounds:
+            result = item.get("result", {})
+            if not isinstance(result, dict):
+                continue
+            execution = result.get("execution", {})
+            if isinstance(execution, dict):
+                planned_stage_count += int(execution.get("planned_stage_count", 0))
+                executed_stage_count += int(execution.get("executed_stage_count", 0))
+            for stage in result.get("stages", []):
+                if isinstance(stage, dict):
+                    stages.append({**stage, "round": item["round"]})
+        if executed_stage_count == planned_stage_count:
+            execution_status = "complete"
+        elif executed_stage_count:
+            execution_status = "partial"
+        else:
+            execution_status = "not_started"
+        return {
+            "schema_version": 1,
+            "kind": "can_diagnostic_loop",
+            "evt": {"variant": self.state.evt.variant, "robot_model": self.state.evt.robot_model},
+            "interfaces": list(interfaces),
+            "round_count": len(rounds),
+            "evaluation": {"verdict": verdict, "findings": findings, "root_cause_hints": []},
+            "execution": {
+                "status": execution_status,
+                "planned_stage_count": planned_stage_count,
+                "executed_stage_count": executed_stage_count,
+            },
+            "stages": stages,
+            "rounds": [
+                {
+                    "round": item["round"],
+                    "verdict": item.get("verdict", "FAIL"),
+                    "bundle": item.get("bundle", {}),
+                }
+                for item in rounds
+            ],
+        }
+
+    @staticmethod
+    def _diagnostic_loop_raw_artifacts(
+        rounds: list[dict[str, object]],
+    ) -> dict[str, str]:
+        artifacts: dict[str, str] = {}
+        for item in rounds:
+            result = item.get("result", {})
+            if not isinstance(result, dict):
+                continue
+            round_number = int(item.get("round", 0))
+            for name, content in diagnostic_raw_artifacts(result).items():
+                artifacts[f"rounds/{round_number:03d}/{name}"] = content
+        return artifacts
 
     def _handle_device_logs(self, action: str, payload: dict[str, Any]) -> None:
         service = DeviceLogService(self._require_remote())
@@ -838,7 +1556,16 @@ class ApplicationCoordinator(QObject):
             self.state.changed.emit()
             self.state.notify_task("motor.state", "event", message)
         elif event_type in {"safety", "state.error"}:
-            self.state.lock(f"Orin agent 安全事件: {message.get('reason') or message.get('message')}")
+            self.state.lock(
+                f"Orin agent 安全事件: {message.get('reason') or message.get('message') or '未知原因'}"
+            )
+
+    @Slot(str)
+    def _handle_local_can_fault(self, message: str) -> None:
+        self.state.safety_locked = True
+        self.state.log("CAN 电机", message, "error")
+        self.state.changed.emit()
+        self.state.notify_task("motor.local_can_safety", "failed", {"error": message})
 
     def _require_can(self, interface: str | None = None) -> CanTransport:
         transport = self._resources.can_transport
@@ -847,11 +1574,34 @@ class ApplicationCoordinator(QObject):
         )
         if requested not in self.state.evt.interfaces:
             raise ValueError(f"当前 {self.state.evt.variant} 不包含接口 {requested}")
+        if self._resources.mode is ConnectionMode.ORIN_REMOTE:
+            client = self._resources.agent_client
+            if client is None:
+                raise RuntimeError("Orin SocketCAN Agent 未部署；请重新连接 Orin")
+            if not client.is_running:
+                controller = self._local_can_motor_controller
+                if controller is not None:
+                    controller.shutdown()
+                    self._local_can_motor_controller = None
+                if isinstance(transport, AgentCanTransport):
+                    transport.close()
+                self._resources.can_transport = None
+                transport = None
+                self.state.log("Orin", "SocketCAN Agent 已退出，正在自动重启", "warning")
+                hello = client.restart()
+                if hello.get("protocol") != "d7-factory-can-agent-jsonl":
+                    raise RuntimeError("Orin SocketCAN Agent 自动恢复握手失败")
         if (
             self._resources.mode is ConnectionMode.ORIN_REMOTE
             and isinstance(transport, AgentCanTransport)
             and transport.bus != requested
         ):
+            controller = self._local_can_motor_controller
+            if controller is not None and controller.transport is transport:
+                if controller.is_holding:
+                    raise RuntimeError("当前 CAN 通道仍在保持电机位置，请先失能再切换通道")
+                controller.shutdown()
+                self._local_can_motor_controller = None
             transport.close()
             transport = None
             self._resources.can_transport = None
@@ -863,6 +1613,11 @@ class ApplicationCoordinator(QObject):
             self._resources.can_transport = transport
         if transport is None:
             raise RuntimeError("CAN 尚未连接")
+        if not transport.is_open:
+            if self._resources.mode is not ConnectionMode.ORIN_REMOTE:
+                raise RuntimeError("CAN 通道已关闭，请重新打开 CAN 盒")
+            config = self.state.evt.interfaces[requested]
+            transport.open(0, config.mode)
         return transport
 
     def _require_remote(self) -> RemoteSession:
@@ -872,7 +1627,7 @@ class ApplicationCoordinator(QObject):
 
     def _require_agent(self) -> OrinAgentClient:
         if self._resources.agent_client is None or not self._resources.agent_client.is_running:
-            raise RuntimeError("Orin motor agent 未部署或未运行；请检查内置资源或自定义 Agent 路径")
+            raise RuntimeError("Orin SocketCAN Agent 未部署或未运行；请重新连接 Orin")
         return self._resources.agent_client
 
     def _require_motor_service(self) -> OrinMotorService:
@@ -886,10 +1641,10 @@ class ApplicationCoordinator(QObject):
         if configured:
             return Path(configured).expanduser()
         base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
-        packaged = base / "d7_factory_studio" / "agent" / "aarch64" / "d7-factory-agent"
+        packaged = base / "d7_factory_studio" / "agent" / "remote_can_agent.py"
         if packaged.is_file():
             return packaged
-        return Path(__file__).resolve().parents[2] / "artifacts" / "agent" / "aarch64" / "d7-factory-agent"
+        return Path(__file__).resolve().parent / "agent" / "remote_can_agent.py"
 
     def _agent_library_dir(self) -> Path:
         configured = str(self.settings.value("ssh/agent_library_dir", "")).strip()

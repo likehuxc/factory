@@ -4,6 +4,7 @@ import ctypes
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -122,7 +123,13 @@ class ZlgTransportConfig:
 class ZlgCanTransport(CanTransport):
     """64-bit ControlCANFD transport for USBCANFD-200U (device type 41)."""
 
-    def __init__(self, config: ZlgTransportConfig | None = None, *, dll: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: ZlgTransportConfig | None = None,
+        *,
+        dll: Any | None = None,
+        on_trace: Callable[[str], None] | None = None,
+    ) -> None:
         self.config = config or ZlgTransportConfig()
         self._dll = dll
         self._device_handle: int | None = None
@@ -132,6 +139,7 @@ class ZlgCanTransport(CanTransport):
         self._lock = threading.RLock()
         self._dll_directory_handle: Any | None = None
         self.dll_path: Path | None = None
+        self._on_trace = on_trace
 
     @property
     def is_open(self) -> bool:
@@ -155,6 +163,12 @@ class ZlgCanTransport(CanTransport):
             channel_handle = self._dll.ZCAN_InitCAN(device, channel, ctypes.byref(init))
             if not channel_handle:
                 raise ZlgTransportError(f"ZCAN_InitCAN failed for channel {channel}")
+            if mode is CanMode.FD:
+                try:
+                    self._configure_receive_filters(channel_handle)
+                except Exception:
+                    self._dll.ZCAN_ResetCAN(channel_handle)
+                    raise
             if self._dll.ZCAN_StartCAN(channel_handle) != STATUS_OK:
                 self._dll.ZCAN_ResetCAN(channel_handle)
                 raise ZlgTransportError(f"ZCAN_StartCAN failed for channel {channel}")
@@ -165,6 +179,10 @@ class ZlgCanTransport(CanTransport):
         self._channel_handle = channel_handle
         self._channel = channel
         self._mode = mode
+        self._trace(
+            f"OPEN ch={channel} mode={mode.value} "
+            f"nominal={self.config.arbitration_baudrate} data={self.config.data_baudrate}"
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -172,6 +190,8 @@ class ZlgCanTransport(CanTransport):
                 self._dll.ZCAN_ResetCAN(self._channel_handle)
             if self._dll is not None and self._device_handle is not None:
                 self._dll.ZCAN_CloseDevice(self._device_handle)
+            if self.is_open:
+                self._trace(f"CLOSE ch={self._channel}")
             self._channel_handle = None
             self._device_handle = None
 
@@ -188,6 +208,7 @@ class ZlgCanTransport(CanTransport):
                 sent = self._dll.ZCAN_Transmit(channel, ctypes.byref(packet), 1)
             if sent != 1:
                 raise ZlgTransportError(f"CAN transmit failed: sent={sent}")
+            self._trace(f"TX {self._format_frame(frame)} accepted_by_driver=1")
 
     def receive(self, timeout_ms: int = 50) -> list[CanFrame]:
         with self._lock:
@@ -198,6 +219,8 @@ class ZlgCanTransport(CanTransport):
             while True:
                 frames = self._receive_classic(channel, 0) + self._receive_fd(channel, 0)
                 if frames or timeout_ms <= 0 or time.monotonic() >= deadline:
+                    for frame in frames:
+                        self._trace(f"RX {self._format_frame(frame)}")
                     return frames
                 time.sleep(min(0.001, max(0.0, deadline - time.monotonic())))
 
@@ -269,6 +292,21 @@ class ZlgCanTransport(CanTransport):
                 function = getattr(self._dll, name)
                 function.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
                 function.restype = ctypes.c_uint
+        for name in ("ZCAN_SetCANFDStandard", "ZCAN_SetResistanceEnable"):
+            if hasattr(self._dll, name):
+                function = getattr(self._dll, name)
+                function.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
+                function.restype = ctypes.c_uint
+        for name in ("ZCAN_ClearFilter", "ZCAN_AckFilter"):
+            if hasattr(self._dll, name):
+                function = getattr(self._dll, name)
+                function.argtypes = [ctypes.c_void_p]
+                function.restype = ctypes.c_uint
+        for name in ("ZCAN_SetFilterMode", "ZCAN_SetFilterStartID", "ZCAN_SetFilterEndID"):
+            if hasattr(self._dll, name):
+                function = getattr(self._dll, name)
+                function.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+                function.restype = ctypes.c_uint
 
     def _make_init_config(self, device: int, channel: int, mode: CanMode) -> ZcanChannelInitConfig:
         init = ZcanChannelInitConfig()
@@ -296,6 +334,16 @@ class ZlgCanTransport(CanTransport):
                 raise ZlgTransportError("failed to set CAN FD arbitration bitrate")
             if self._dll.ZCAN_SetDbitBaud(device, channel, self.config.data_baudrate) != STATUS_OK:
                 raise ZlgTransportError("failed to set CAN FD data bitrate")
+            if (
+                hasattr(self._dll, "ZCAN_SetCANFDStandard")
+                and self._dll.ZCAN_SetCANFDStandard(device, channel, 0) != STATUS_OK
+            ):
+                raise ZlgTransportError("failed to select ISO CAN FD standard")
+            if (
+                hasattr(self._dll, "ZCAN_SetResistanceEnable")
+                and self._dll.ZCAN_SetResistanceEnable(device, channel, 1) != STATUS_OK
+            ):
+                raise ZlgTransportError(f"failed to enable termination resistance on channel {channel}")
             return
         if hasattr(self._dll, "ZCAN_SetValue"):
             settings = (
@@ -309,10 +357,45 @@ class ZlgCanTransport(CanTransport):
             return
         raise ZlgTransportError("ControlCANFD.dll has no supported CAN FD bitrate API")
 
+    def _configure_receive_filters(self, channel_handle: int) -> None:
+        functions = (
+            "ZCAN_ClearFilter",
+            "ZCAN_SetFilterMode",
+            "ZCAN_SetFilterStartID",
+            "ZCAN_SetFilterEndID",
+            "ZCAN_AckFilter",
+        )
+        if not all(hasattr(self._dll, name) for name in functions):
+            return
+        if self._dll.ZCAN_ClearFilter(channel_handle) != STATUS_OK:
+            raise ZlgTransportError("failed to clear CAN FD receive filters")
+        for mode, start_id, end_id in (
+            (0, 0x000, 0x7FF),
+            (1, 0x00000000, 0x1FFFFFFF),
+        ):
+            if self._dll.ZCAN_SetFilterMode(channel_handle, mode) != STATUS_OK:
+                raise ZlgTransportError(f"failed to select CAN FD receive filter mode {mode}")
+            if self._dll.ZCAN_SetFilterStartID(channel_handle, start_id) != STATUS_OK:
+                raise ZlgTransportError(f"failed to set CAN FD receive filter start ID 0x{start_id:X}")
+            if self._dll.ZCAN_SetFilterEndID(channel_handle, end_id) != STATUS_OK:
+                raise ZlgTransportError(f"failed to set CAN FD receive filter end ID 0x{end_id:X}")
+            if self._dll.ZCAN_AckFilter(channel_handle) != STATUS_OK:
+                raise ZlgTransportError(f"failed to apply CAN FD receive filter mode {mode}")
+
     def _require_channel(self) -> int:
         if not self.is_open or self._channel_handle is None:
             raise ZlgTransportError("CAN transport is not open")
         return self._channel_handle
+
+    def _format_frame(self, frame: CanFrame) -> str:
+        kind = "FD" if frame.is_fd else "CAN"
+        brs = " brs=1" if frame.is_fd and frame.bitrate_switch else " brs=0" if frame.is_fd else ""
+        identifier = f"0x{frame.arbitration_id:08X}" if frame.is_extended else f"0x{frame.arbitration_id:03X}"
+        return f"ch={self._channel} {kind}{brs} id={identifier} len={len(frame.data)} data={frame.data.hex(' ').upper()}"
+
+    def _trace(self, message: str) -> None:
+        if self._on_trace is not None:
+            self._on_trace(message)
 
 
 def timing_for_baudrate(baudrate: int) -> tuple[int, int]:

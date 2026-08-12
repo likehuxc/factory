@@ -67,11 +67,10 @@ class TaskManager(QObject):
         token = CancellationToken()
         worker = TaskWorker(task_id, operation, token)
         worker.signals.progress.connect(self.progress)
-        worker.signals.succeeded.connect(self.succeeded)
-        worker.signals.failed.connect(self.failed)
-        worker.signals.cancelled.connect(self.cancelled)
-        worker.signals.finished.connect(self._cleanup)
-        worker.signals.finished.connect(self.finished)
+        worker.signals.succeeded.connect(self._on_succeeded)
+        worker.signals.failed.connect(self._on_failed)
+        worker.signals.cancelled.connect(self._on_cancelled)
+        worker.signals.finished.connect(self._on_finished)
         self._tokens[task_id] = token
         self._workers[task_id] = worker
         self.pool.start(worker)
@@ -97,3 +96,23 @@ class TaskManager(QObject):
     def _cleanup(self, task_id: str) -> None:
         self._tokens.pop(task_id, None)
         self._workers.pop(task_id, None)
+
+    @Slot(str, object)
+    def _on_succeeded(self, task_id: str, result: object) -> None:
+        self._cleanup(task_id)
+        self.succeeded.emit(task_id, result)
+
+    @Slot(str, str, str)
+    def _on_failed(self, task_id: str, error: str, traceback_text: str) -> None:
+        self._cleanup(task_id)
+        self.failed.emit(task_id, error, traceback_text)
+
+    @Slot(str)
+    def _on_cancelled(self, task_id: str) -> None:
+        self._cleanup(task_id)
+        self.cancelled.emit(task_id)
+
+    @Slot(str)
+    def _on_finished(self, task_id: str) -> None:
+        self._cleanup(task_id)
+        self.finished.emit(task_id)

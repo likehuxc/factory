@@ -44,6 +44,9 @@ class OrinMotorService:
     def clear_errors(self, target: dict[str, Any]) -> None:
         self.client.request("motor.clear_errors", target=self.normalize_target(target))
 
+    def release_brake(self, target: dict[str, Any]) -> None:
+        self.client.request("motor.release_brake", target=self.normalize_target(target))
+
     def set_control_authority(self, target: dict[str, Any], owned: bool) -> None:
         self.client.request(
             "motor.set_control_authority",
@@ -58,7 +61,24 @@ class OrinMotorService:
 
     def set_position(self, target: dict[str, Any], angle_deg: float) -> None:
         radians = float(angle_deg) * 3.141592653589793 / 180.0
-        self.client.request("motor.set_position", target=self.normalize_target(target), args={"rad": radians})
+        self.set_position_rad(target, radians)
+
+    def set_position_rad(self, target: dict[str, Any], position_rad: float) -> None:
+        self.client.request(
+            "motor.set_position",
+            target=self.normalize_target(target),
+            args={"rad": float(position_rad)},
+        )
+
+    def move_relative(self, target: dict[str, Any], angle_deg: float) -> dict[str, Any]:
+        return self.client.request(
+            "motor.move_relative",
+            target=self.normalize_target(target),
+            args={"delta_rad": float(angle_deg) * 3.141592653589793 / 180.0},
+        )
+
+    def read_position(self, target: dict[str, Any]) -> dict[str, Any]:
+        return self.client.request("motor.read_position", target=self.normalize_target(target))
 
     def set_velocity(self, target: dict[str, Any], rad_s: float, accel_time_ms: int = 1000) -> None:
         velocity = float(rad_s)
@@ -96,10 +116,12 @@ class OrinMotorService:
             return "motors", tuple(normalized["motors"])
         return "groups", tuple(normalized["groups"])
 
-    def emergency_stop(self, target: dict[str, Any]) -> None:
+    def emergency_stop(self, target: dict[str, Any], accel_time_ms: int = 1000) -> None:
         # Explicit zero velocity precedes disable; agent also repeats this on EOF/cancel.
         normalized = self.normalize_target(target)
         self.client.request(
-            "motor.set_velocity", target=normalized, args={"rad_s": 0.0, "accel_time_ms": 1000}
+            "motor.set_velocity",
+            target=normalized,
+            args={"rad_s": 0.0, "accel_time_ms": int(accel_time_ms)},
         )
         self.client.request("motor.disable", target=normalized)

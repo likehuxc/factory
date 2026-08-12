@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shlex
 
 from d7_factory_studio.core.evt import EvtConfig, MotorNodeConfig
 from d7_factory_studio.core.ports import RemoteCommandRequest
@@ -10,6 +9,7 @@ FRAME_RE = re.compile(
     r"\b(can\d+)\s+([0-9A-Fa-f]{3,8})(?:(?:##[0-9A-Fa-f]|#)[0-9A-Fa-f]*|\s+\[\s*\d+\s*\](?:\s+[0-9A-Fa-f]{2})*)"
 )
 DEFAULT_QUERY_PAYLOAD = "404040080452"
+LIVE_RESPONSE_PREFIX = "__D7_BROADCAST_RESPONSE__"
 
 
 def broadcast_request(
@@ -37,13 +37,15 @@ candump -L "$iface" & dump_pid=$!; sleep 0.2
 end=$((SECONDS + duration))
 while [ "$SECONDS" -lt "$end" ]; do cansend "$iface" "$frame" 2>>"$err_file"; sleep 0.01; done
 sleep 0.5; kill "$dump_pid" 2>/dev/null; wait "$dump_pid" 2>/dev/null; dump_pid=""
-echo "__SEND_ERROR_COUNT__:$(wc -l < "$err_file" | tr -d ' ')"
+send_errors="$(wc -l < "$err_file" | tr -d ' ')"
+echo "__SEND_ERROR_COUNT__:${send_errors:-0}"
+if [ "${send_errors:-0}" -gt 0 ]; then
+  echo "__SEND_ERROR__:$(head -n 1 "$err_file")"
+fi
+echo "__BROADCAST_DONE__"
 """.strip()
-    command = (
-        f"sh -c {shlex.quote(script)} d7-broadcast {shlex.quote(interface)} {duration} {shlex.quote(frame)}"
-    )
     return RemoteCommandRequest(
-        ("sh", "-lc", command),
+        ("bash", "-c", script, "--", interface, str(duration), frame),
         timeout_s=duration + 12,
         stream_output=True,
         evidence_label=f"broadcast-{interface}",
@@ -58,14 +60,26 @@ def parse_broadcast_frame(line: str) -> tuple[str, int] | None:
 def responding_node(evt: EvtConfig, interface: str, frame_id: int) -> MotorNodeConfig | None:
     if frame_id == evt.broadcast.request_id:
         return None
+    device_id = frame_id & 0xFF
     return next(
-        (
-            node
-            for node in evt.nodes_for_bus(interface)
-            if frame_id == (evt.broadcast.response_base_id + node.dev_id) & 0x7FF
-        ),
+        (node for node in evt.nodes_for_bus(interface) if node.dev_id == device_id),
         None,
     )
+
+
+def live_response_event(interface: str, logic_id: int, count: int, frame_id: int) -> str:
+    return f"{LIVE_RESPONSE_PREFIX}:{interface}:{logic_id}:{count}:{frame_id:X}"
+
+
+def parse_live_response_event(line: str) -> tuple[str, int, int, int] | None:
+    prefix = f"{LIVE_RESPONSE_PREFIX}:"
+    if not line.startswith(prefix):
+        return None
+    try:
+        interface, logic_id, count, frame_id = line[len(prefix) :].strip().split(":", 3)
+        return interface, int(logic_id), int(count), int(frame_id, 16)
+    except ValueError:
+        return None
 
 
 def summarize_responses(evt: EvtConfig, interface: str, lines: tuple[str, ...]) -> dict[str, object]:

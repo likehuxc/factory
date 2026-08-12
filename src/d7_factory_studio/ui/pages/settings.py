@@ -25,8 +25,14 @@ from d7_factory_studio.core.evt import (
     load_builtin_evt,
     remap_evt_can,
 )
-from d7_factory_studio.settings_store import SettingsStore
+from d7_factory_studio.features.diagnostics.node_params import (
+    DEFAULT_NODE_PARAMETER_BINARY,
+    DEFAULT_NODE_PARAMETER_CONFIG,
+    validate_remote_absolute_path,
+)
+from d7_factory_studio.settings_store import SettingsStore, ssh_fingerprint_key
 from d7_factory_studio.ui.controls import D7ComboBox as QComboBox
+from d7_factory_studio.ui.controls import D7DoubleSpinBox as QDoubleSpinBox
 from d7_factory_studio.ui.controls import D7SpinBox as QSpinBox
 from d7_factory_studio.ui.pages.base import InlineMessage, WorkbenchPage
 from d7_factory_studio.ui.widgets import Card, PageHeader
@@ -38,13 +44,12 @@ class SettingsPage(WorkbenchPage):
         self.state = state
         self.settings = settings
         self._load_saved_can_mappings()
-        self.layout.addWidget(
-            PageHeader("设置", "管理 PC CAN、Orin SSH、文件路径和高风险操作；切换关键配置会恢复安全锁。")
-        )
+        self.layout.addWidget(PageHeader("设置", "管理 PC CAN、Orin SSH、文件路径和高风险操作。"))
         tabs = QTabWidget()
         tabs.addTab(self._pc_tab(), "PC CAN")
         tabs.addTab(self._can_mapping_tab(), "CAN 映射")
         tabs.addTab(self._ssh_tab(), "Orin SSH")
+        tabs.addTab(self._serial485_tab(), "485 与运动")
         tabs.addTab(self._diagnostics_tab(), "网络诊断")
         tabs.addTab(self._paths_tab(), "文件与报告")
         tabs.addTab(self._safety_tab(), "安全")
@@ -85,13 +90,44 @@ class SettingsPage(WorkbenchPage):
         layout.addStretch(1)
         return tab
 
+    def _serial485_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 12, 0, 0)
+        card = Card("485 通信与运动默认值")
+        form = QFormLayout()
+        self.serial_baud = QComboBox()
+        self.serial_baud.addItems(["115200", "921600", "1000000", "2000000"])
+        self.serial_baud.setCurrentText(str(self.settings.value("serial485/baud", 115200)))
+        self.serial_accel = QDoubleSpinBox()
+        self.serial_accel.setRange(0.01, 20.0)
+        self.serial_accel.setDecimals(2)
+        self.serial_accel.setSuffix(" rad/s²")
+        self.serial_accel.setValue(float(self.settings.value("serial485/accel_rad_s2", 1.0)))
+        self.serial_decel = QDoubleSpinBox()
+        self.serial_decel.setRange(0.01, 20.0)
+        self.serial_decel.setDecimals(2)
+        self.serial_decel.setSuffix(" rad/s²")
+        self.serial_decel.setValue(float(self.settings.value("serial485/decel_rad_s2", 1.0)))
+        form.addRow("485 波特率", self.serial_baud)
+        form.addRow("默认加速度", self.serial_accel)
+        form.addRow("默认减速度", self.serial_decel)
+        card.body.addLayout(form)
+        save = QPushButton("保存 485 设置")
+        save.setProperty("primary", True)
+        save.clicked.connect(self._save_serial485)
+        card.body.addWidget(save)
+        layout.addWidget(card)
+        layout.addStretch(1)
+        return tab
+
     def _can_mapping_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 12, 0, 0)
         layout.addWidget(
             InlineMessage(
-                "四个电机区域可分别选择 Orin CAN 通道。保存并应用后会断开当前连接并恢复安全锁。",
+                "四个电机区域可分别选择 Orin CAN 通道。保存并应用后会断开当前连接。",
                 "info",
             )
         )
@@ -136,21 +172,19 @@ class SettingsPage(WorkbenchPage):
         self.port = QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(int(self.settings.value("ssh/port", 22)))
-        self.username = QLineEdit(str(self.settings.value("ssh/username", "pudu")))
+        self.username = QLineEdit(str(self.settings.value("ssh/username", "pudu")).strip() or "pudu")
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         saved_password = self.settings.ssh_password(self.host.text(), self.username.text())
-        if saved_password:
-            self.password.setText(saved_password)
-        self.known_host = QLineEdit(str(self.settings.value("ssh/fingerprint", "")))
+        self.password.setText(saved_password or "pudu")
+        self.known_host = QLineEdit(str(self.settings.value(ssh_fingerprint_key(self.host.text()), "")))
         self.known_host.setPlaceholderText("首次连接后确认并保存主机指纹")
+        self.host.editingFinished.connect(self._load_ssh_host_credentials)
         self.agent_binary = QLineEdit(str(self.settings.value("ssh/agent_binary", "")))
         self.agent_binary.setPlaceholderText("高级覆盖：默认使用软件内置 Agent")
         self.agent_config = QLineEdit(str(self.settings.value("ssh/agent_config", "")))
         self.agent_config.setPlaceholderText("高级覆盖：留空时根据当前 EVT 自动生成")
-        self.agent_library_dir = QLineEdit(
-            str(self.settings.value("ssh/agent_library_dir", ""))
-        )
+        self.agent_library_dir = QLineEdit(str(self.settings.value("ssh/agent_library_dir", "")))
         self.agent_library_dir.setPlaceholderText("高级覆盖：默认使用 Agent 配套依赖")
         form.addRow("主机", self.host)
         form.addRow("端口", self.port)
@@ -216,9 +250,7 @@ class SettingsPage(WorkbenchPage):
         self.adb_serial = QLineEdit(str(self.settings.value("diagnostics/adb_serial", "")))
         self.rk_wlan = QLineEdit(str(self.settings.value("diagnostics/rk_wlan", "wlan0")))
         self.rk_ethernet = QLineEdit(str(self.settings.value("diagnostics/rk_ethernet", "eth0")))
-        self.orin_ethernet = QLineEdit(
-            str(self.settings.value("diagnostics/orin_ethernet", "eth0"))
-        )
+        self.orin_ethernet = QLineEdit(str(self.settings.value("diagnostics/orin_ethernet", "eth0")))
         self.orin_ip = QLineEdit(str(self.settings.value("diagnostics/orin_ip", "10.254.254.1")))
         self.forward_port = QSpinBox()
         self.forward_port.setRange(1, 65535)
@@ -236,6 +268,26 @@ class SettingsPage(WorkbenchPage):
         save.clicked.connect(self._save_diagnostics)
         card.body.addWidget(save)
         layout.addWidget(card)
+
+        parameter_card = Card(
+            "电机参数检查",
+            "Orin 上季华参数工具及其 calibration_info.yaml 的绝对路径。",
+        )
+        parameter_form = QFormLayout()
+        self.node_parameter_binary = QLineEdit(
+            str(self.settings.value("diagnostics/node_binary", DEFAULT_NODE_PARAMETER_BINARY))
+        )
+        self.node_parameter_config = QLineEdit(
+            str(self.settings.value("diagnostics/node_config", DEFAULT_NODE_PARAMETER_CONFIG))
+        )
+        parameter_form.addRow("远端参数工具", self.node_parameter_binary)
+        parameter_form.addRow("远端参数配置", self.node_parameter_config)
+        parameter_card.body.addLayout(parameter_form)
+        save_parameters = QPushButton("保存参数检查设置")
+        save_parameters.setProperty("primary", True)
+        save_parameters.clicked.connect(self._save_node_parameters)
+        parameter_card.body.addWidget(save_parameters)
+        layout.addWidget(parameter_card)
         layout.addStretch(1)
         return tab
 
@@ -243,17 +295,11 @@ class SettingsPage(WorkbenchPage):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 12, 0, 0)
-        layout.addWidget(
-            InlineMessage(
-                "安全策略不能被永久关闭：每次连接、故障、掉线、通道或 EVT 切换都会重新锁定。", "warning"
-            )
-        )
+        layout.addWidget(InlineMessage("高风险诊断和原始 CAN 操作仍按下方选项控制。", "warning"))
         card = Card("高风险操作")
         self.allow_dmesg_clear = QCheckBox("允许诊断页显示 dmesg -C 操作（执行时仍需二次确认）")
         self.allow_raw_can = QCheckBox("允许整机页发送原始 CAN 帧（执行时仍需二次确认）")
-        self.allow_dmesg_clear.setChecked(
-            self.settings.bool_value("safety/allow_dmesg_clear")
-        )
+        self.allow_dmesg_clear.setChecked(self.settings.bool_value("safety/allow_dmesg_clear"))
         self.allow_raw_can.setChecked(self.settings.bool_value("safety/allow_raw_can"))
         card.body.addWidget(self.allow_dmesg_clear)
         card.body.addWidget(self.allow_raw_can)
@@ -278,15 +324,18 @@ class SettingsPage(WorkbenchPage):
     def _save_pc(self) -> None:
         self.settings.set_value("zlg/device_index", self.device_index.value())
         self.settings.set_value("zlg/channel", self.channel_index.value())
-        self.state.lock("PC CAN 设置已更新，安全锁已恢复")
+
+    def _save_serial485(self) -> None:
+        self.settings.set_value("serial485/baud", int(self.serial_baud.currentText()))
+        self.settings.set_value("serial485/accel_rad_s2", self.serial_accel.value())
+        self.settings.set_value("serial485/decel_rad_s2", self.serial_decel.value())
+        QMessageBox.information(self, "485 设置已保存", "新的默认值将在下次打开 485 时生效。")
 
     def _load_saved_can_mappings(self) -> None:
         for variant in ("EVT1", "EVT2"):
             defaults = evt_can_mapping(load_builtin_evt(variant))
             mapping = {
-                region: str(
-                    self.settings.value(f"can_mapping/{variant}/{region}", defaults[region])
-                ).lower()
+                region: str(self.settings.value(f"can_mapping/{variant}/{region}", defaults[region])).lower()
                 for region in CAN_REGIONS
             }
             try:
@@ -304,9 +353,7 @@ class SettingsPage(WorkbenchPage):
         self.ota_channel.setText(ota_bus.upper())
         available = [f"can{index}" for index in range(8) if f"can{index}" != ota_bus]
         for region, combo in self.region_channels.items():
-            saved = str(
-                self.settings.value(f"can_mapping/{variant}/{region}", defaults[region])
-            ).lower()
+            saved = str(self.settings.value(f"can_mapping/{variant}/{region}", defaults[region])).lower()
             combo.blockSignals(True)
             combo.clear()
             combo.addItems([bus.upper() for bus in available])
@@ -321,9 +368,7 @@ class SettingsPage(WorkbenchPage):
 
     def _save_can_mapping(self) -> None:
         variant = self.mapping_profile.currentText()
-        mapping = {
-            region: combo.currentText().lower() for region, combo in self.region_channels.items()
-        }
+        mapping = {region: combo.currentText().lower() for region, combo in self.region_channels.items()}
         try:
             remap_evt_can(load_builtin_evt(variant), mapping)
         except EvtConfigError as exc:
@@ -344,6 +389,12 @@ class SettingsPage(WorkbenchPage):
             fingerprint=self.known_host.text(),
         )
 
+    def _load_ssh_host_credentials(self) -> None:
+        host = self.host.text().strip()
+        username = self.username.text().strip() or "pudu"
+        self.known_host.setText(str(self.settings.value(ssh_fingerprint_key(host), "")))
+        self.password.setText(self.settings.ssh_password(host, username) or "pudu")
+
     def _save_ssh(self) -> None:
         if not self.host.text().strip() or not self.username.text().strip():
             QMessageBox.warning(self, "SSH 设置无效", "主机和用户名不能为空。")
@@ -351,7 +402,7 @@ class SettingsPage(WorkbenchPage):
         self.settings.set_value("ssh/host", self.host.text().strip())
         self.settings.set_value("ssh/port", self.port.value())
         self.settings.set_value("ssh/username", self.username.text().strip())
-        self.settings.set_value("ssh/fingerprint", self.known_host.text().strip())
+        self.settings.set_value(ssh_fingerprint_key(self.host.text()), self.known_host.text().strip())
         self.settings.set_value("ssh/agent_binary", self.agent_binary.text().strip())
         self.settings.set_value("ssh/agent_config", self.agent_config.text().strip())
         self.settings.set_value("ssh/agent_library_dir", self.agent_library_dir.text().strip())
@@ -363,7 +414,6 @@ class SettingsPage(WorkbenchPage):
             except Exception as exc:  # keyring surfaces backend-specific failures
                 QMessageBox.critical(self, "凭据保存失败", str(exc))
                 return
-        self.state.lock("SSH 设置已更新，安全锁已恢复")
 
     def _choose_dir(self, editor: QLineEdit) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择目录", editor.text())
@@ -376,9 +426,7 @@ class SettingsPage(WorkbenchPage):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         choose = QPushButton("选择")
-        choose.clicked.connect(
-            lambda: self._choose_file(editor, caption)
-        )
+        choose.clicked.connect(lambda: self._choose_file(editor, caption))
         layout.addWidget(editor, 1)
         layout.addWidget(choose)
         return container
@@ -415,7 +463,18 @@ class SettingsPage(WorkbenchPage):
         }
         for key, value in values.items():
             self.settings.set_value(key, value)
-        self.state.lock("网络诊断设置已更新，安全锁已恢复")
+
+    def _save_node_parameters(self) -> None:
+        try:
+            binary = validate_remote_absolute_path(self.node_parameter_binary.text(), "参数工具")
+            config = validate_remote_absolute_path(self.node_parameter_config.text(), "参数配置")
+        except ValueError as exc:
+            QMessageBox.warning(self, "参数检查设置无效", str(exc))
+            return
+        self.node_parameter_binary.setText(binary)
+        self.node_parameter_config.setText(config)
+        self.settings.set_value("diagnostics/node_binary", binary)
+        self.settings.set_value("diagnostics/node_config", config)
 
     def _save_safety(self) -> None:
         self.settings.set_value("safety/allow_dmesg_clear", self.allow_dmesg_clear.isChecked())
@@ -439,9 +498,7 @@ class SettingsPage(WorkbenchPage):
                 ):
                     self.known_host.setText(fingerprint)
             else:
-                QMessageBox.information(
-                    self, "SSH 连接成功", f"远端主机：{payload.get('hostname', '')}"
-                )
+                QMessageBox.information(self, "SSH 连接成功", f"远端主机：{payload.get('hostname', '')}")
         elif action.startswith("settings.") and event == "failed":
             error = payload.get("error", "未知错误") if isinstance(payload, dict) else "未知错误"
             QMessageBox.critical(self, "设置检查失败", str(error))
